@@ -90,8 +90,18 @@ class YouTubeDownloader:
 
 def _apply_cookies(ydl_opts: Dict[str, Any]) -> Dict[str, Any]:
     cookie_file = os.environ.get("YTDLP_COOKIES_FILE")
-    if cookie_file and os.path.isfile(cookie_file):
+    if not cookie_file:
+        logger.warning(
+            "YTDLP_COOKIES_FILE is unset; YouTube may block downloads with bot checks"
+        )
+        return ydl_opts
+    if os.path.isfile(cookie_file):
         ydl_opts["cookiefile"] = cookie_file
+    else:
+        logger.warning(
+            "YTDLP_COOKIES_FILE=%s is missing; YouTube may block downloads with bot checks",
+            cookie_file,
+        )
     return ydl_opts
 
 

@@ -79,6 +79,7 @@ services:
     volumes:
       - uploads:/app/uploads
       - clips:/app/clips
+      - cookies:/app/cookies
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
@@ -90,6 +91,7 @@ services:
       - ASSEMBLY_AI_API_KEY=${ASSEMBLY_AI_API_KEY:-}
       - ASSEMBLY_AI_HTTP_TIMEOUT_SECONDS=${ASSEMBLY_AI_HTTP_TIMEOUT_SECONDS:-900}
       - APIFY_API_TOKEN=${APIFY_API_TOKEN:-}
+      - YTDLP_COOKIES_FILE=/app/cookies/youtube.txt
       - APIFY_YOUTUBE_DOWNLOADER_ACTOR=${APIFY_YOUTUBE_DOWNLOADER_ACTOR:-epctex/youtube-video-downloader}
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - APIFY_RUN_TIMEOUT_SECONDS=${APIFY_RUN_TIMEOUT_SECONDS:-3600}
