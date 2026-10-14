@@ -6,6 +6,7 @@ Optimized for free yt-dlp downloads with optional Apify fallback.
 import asyncio
 from datetime import datetime
 import logging
+import os
 import re
 import subprocess
 import time
@@ -47,7 +48,11 @@ class YouTubeDownloader:
         opts = {
             "outtmpl": str(output_path),
             # Use best available video/audio to avoid quality caps from container constraints.
-            "format": "bestvideo*+bestaudio/best",
+            "format": (
+                f"bestvideo*[height<={os.environ['YOUTUBE_MAX_HEIGHT']}]+bestaudio/best[height<={os.environ['YOUTUBE_MAX_HEIGHT']}]"
+                if os.environ.get("YOUTUBE_MAX_HEIGHT", "").isdigit()
+                else "bestvideo*+bestaudio/best"
+            ),
             "format_sort": ["res", "fps"],
             "merge_output_format": "mp4",
             "writesubtitles": False,
@@ -83,6 +88,13 @@ class YouTubeDownloader:
         return opts
 
 
+def _apply_cookies(ydl_opts: Dict[str, Any]) -> Dict[str, Any]:
+    cookie_file = os.environ.get("YTDLP_COOKIES_FILE")
+    if cookie_file and os.path.isfile(cookie_file):
+        ydl_opts["cookiefile"] = cookie_file
+    return ydl_opts
+
+
 def _build_info_options() -> Dict[str, Any]:
     ydl_opts = {
         "quiet": True,
@@ -98,7 +110,7 @@ def _build_info_options() -> Dict[str, Any]:
         },
         "nocheckcertificate": True,
     }
-    return ydl_opts
+    return _apply_cookies(ydl_opts)
 
 
 def _empty_video_info(video_id: Optional[str] = None) -> Dict[str, Any]:
@@ -529,7 +541,7 @@ def _download_youtube_video_with_ytdlp(
         try:
             logger.info("Download attempt %s/%s", attempt + 1, max_retries)
 
-            ydl_opts = downloader.get_optimal_download_options(video_id)
+            ydl_opts = _apply_cookies(downloader.get_optimal_download_options(video_id))
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])

@@ -16,3 +16,4 @@ frontend/test-results/
 backend/demo_clips/
 backend/demo_clips_*.log
 backend/run_demo.py
+cookies/

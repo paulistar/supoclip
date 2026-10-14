@@ -14,7 +14,12 @@ class Config:
     def __init__(self):
         self.openai_api_key = self._get_runtime_setting("OPENAI_API_KEY")
         self.openrouter_api_key = self._get_runtime_setting("OPENROUTER_API_KEY")
-        self.openrouter_fallback_model = self._get_optional_env("OPENROUTER_FALLBACK_MODEL") or "openai/gpt-6-luna"
+        # Extra keys (comma/space/newline separated) tried in order when the
+        # active one is out of credit or rate limited. Primary key always first.
+        self.openrouter_api_keys = self._merge_api_keys(
+            self.openrouter_api_key, self._get_optional_env("OPENROUTER_API_KEYS")
+        )
+        self.openrouter_fallback_model =self._get_optional_env("OPENROUTER_FALLBACK_MODEL") or "openai/gpt-6-luna"
         self.anthropic_api_key = self._get_runtime_setting("ANTHROPIC_API_KEY")
         self.google_api_key = self._get_runtime_setting("GOOGLE_API_KEY")
         self.youtube_data_api_key = self._get_runtime_setting("YOUTUBE_DATA_API_KEY")
@@ -172,6 +177,16 @@ class Config:
         if (plan or "").lower() == "pro":
             return self.pro_youtube_max_video_duration
         return self.max_video_duration
+
+    @staticmethod
+    def _merge_api_keys(primary, extra) -> list[str]:
+        """Primary key first, then extras; split on commas/whitespace, deduped."""
+        keys: list[str] = []
+        for raw in [primary or "", *(extra or "").replace(",", " ").split()]:
+            key = raw.strip()
+            if key and key not in keys:
+                keys.append(key)
+        return keys
 
     @staticmethod
     def _get_optional_env(name: str):

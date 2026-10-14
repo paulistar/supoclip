@@ -14,6 +14,7 @@ import httpx
 from pydantic_ai import Agent, NativeOutput
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models import Model
+from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.ollama import OllamaModel
 from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
@@ -514,6 +515,15 @@ def _get_missing_llm_key_error(model_name: str, runtime_config: Config) -> Optio
     return None
 
 
+def _openrouter_keys(runtime_config: Config) -> list[str]:
+    """Active OpenRouter key first, then any extras from OPENROUTER_API_KEYS."""
+    keys = list(getattr(runtime_config, "openrouter_api_keys", None) or [])
+    primary = runtime_config.openrouter_api_key
+    if primary and primary not in keys:
+        keys.insert(0, primary)
+    return keys
+
+
 def _build_transcript_model(
     runtime_config: Config, model_name: str | None = None
 ) -> Model | str:
@@ -528,17 +538,24 @@ def _build_transcript_model(
         profile = OpenRouterProvider.model_profile(provider_model_name).update(
             OpenAIModelProfile(supports_json_schema_output=True)
         )
-        return OpenRouterModel(
-            provider_model_name,
-            provider=OpenRouterProvider(api_key=runtime_config.openrouter_api_key),
-            profile=profile,
-            settings={
-                "openrouter_models": [fallback] if fallback != provider_model_name else [],
-                "openrouter_provider": {"allow_fallbacks": True, "require_parameters": True, "data_collection": "deny"},
-                "openrouter_reasoning": {"effort": "low"},
-                "max_tokens": 8192,
-            },
-        )
+        settings = {
+            "openrouter_models": [fallback] if fallback != provider_model_name else [],
+            "openrouter_provider": {"allow_fallbacks": True, "require_parameters": True, "data_collection": "deny"},
+            "openrouter_reasoning": {"effort": "low"},
+            "max_tokens": 8192,
+        }
+        # One model per key, in priority order. FallbackModel moves to the next
+        # key on an API error (401/402/429 etc.), so a drained key never stops a job.
+        models = [
+            OpenRouterModel(
+                provider_model_name,
+                provider=OpenRouterProvider(api_key=key),
+                profile=profile,
+                settings=settings,
+            )
+            for key in _openrouter_keys(runtime_config)
+        ]
+        return models[0] if len(models) == 1 else FallbackModel(*models)
     if provider != "ollama":
         return model_name
 
@@ -565,7 +582,7 @@ def get_transcript_agent() -> Agent[None, TranscriptAnalysis]:
     signature = (
         runtime_config.llm,
         runtime_config.openai_api_key,
-        runtime_config.openrouter_api_key,
+        *_openrouter_keys(runtime_config),
         runtime_config.openrouter_fallback_model,
         runtime_config.google_api_key,
         runtime_config.anthropic_api_key,
@@ -644,7 +661,7 @@ def get_rerank_agent() -> Agent[None, CandidateRanking]:
     signature = (
         model_name,
         runtime_config.openai_api_key,
-        runtime_config.openrouter_api_key,
+        *_openrouter_keys(runtime_config),
         runtime_config.openrouter_fallback_model,
         runtime_config.google_api_key,
         runtime_config.anthropic_api_key,
