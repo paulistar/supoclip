@@ -90,7 +90,7 @@ def test_parse_transcript_timestamp_supports_minute_and_hour_formats():
     assert _parse_transcript_timestamp_seconds("01:02:35") == 3755
     assert _format_transcript_timestamp(155) == "02:35"
     assert _format_transcript_timestamp(3755) == "01:02:35"
-    assert MIN_ACCEPTED_CLIP_SECONDS == 15
+    assert MIN_ACCEPTED_CLIP_SECONDS == 20
 
 
 def test_transcript_span_helpers_repair_near_miss_durations():

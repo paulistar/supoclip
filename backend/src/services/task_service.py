@@ -31,6 +31,7 @@ from ..config import Config, get_config
 from ..youtube_utils import cleanup_downloaded_files, extract_video_id
 from ..clip_cleanup import normalize_clip_cleanup_settings
 from ..ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
+from ..clip_selection import ClipSelectionPrefs, parse_clip_selection_prefs
 from ..clip_source_map import load_clip_caption_settings
 
 logger = logging.getLogger(__name__)
@@ -50,10 +51,16 @@ class TaskService(ClipEditingMixin):
         self.config = config or get_config()
 
     @staticmethod
-    def _build_cache_key(url: str, source_type: str, processing_mode: str) -> str:
+    def _build_cache_key(
+        url: str,
+        source_type: str,
+        processing_mode: str,
+        prefs: ClipSelectionPrefs | None = None,
+    ) -> str:
+        selection = prefs or ClipSelectionPrefs()
         payload = (
             f"{source_type}|{processing_mode}|"
-            f"{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|{url.strip()}"
+            f"{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|{selection.cache_token()}|{url.strip()}"
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -250,7 +257,14 @@ class TaskService(ClipEditingMixin):
             logger.info(f"Starting processing for task {task_id}")
             started_at = datetime.utcnow()
             stage_timings: Dict[str, float] = {}
-            cache_key = self._build_cache_key(url, source_type, processing_mode)
+            source_metadata = await self.task_repo.load_source_metadata(self.db, task_id)
+            try:
+                clip_prefs = parse_clip_selection_prefs(source_metadata)
+            except ValueError:
+                clip_prefs = ClipSelectionPrefs()
+            cache_key = self._build_cache_key(
+                url, source_type, processing_mode, prefs=clip_prefs
+            )
 
             cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
             cached_transcript = (
@@ -318,6 +332,7 @@ class TaskService(ClipEditingMixin):
                 cached_analysis_json=cached_analysis_json,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
+                clip_prefs=clip_prefs,
             )
             stage_timings["pipeline_seconds"] = round(
                 perf_counter() - pipeline_start, 3

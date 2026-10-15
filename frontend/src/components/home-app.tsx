@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
 import {
   AlertCircle, ArrowRight, ArrowUp, Captions, CaptionsOff, Check, ChevronDown, Crop, FileVideo,
-  Loader2, Paintbrush, Paperclip, Upload, Wand2, X, Youtube,
+  Loader2, Paintbrush, Paperclip, Timer, Upload, Wand2, Clapperboard, X, Youtube,
 } from "lucide-react";
 import { CaptionSizeControl } from "@/components/caption-size-control";
 import { FONT_SEARCH_THRESHOLD, getYouTubeThumbnailUrl, uploadVideoFile } from "@/lib/video-upload";
@@ -21,6 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
 import { Kbd } from "@/components/ui/kbd";
 import { useSession } from "@/lib/auth-client";
 import { useBillingSummary } from "@/hooks/use-billing-summary";
@@ -29,6 +30,20 @@ import { track } from "@/lib/datafast";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
 import { buildFontOptionsPayload, FONT_TEMPLATE_DEFAULT_VALUE } from "@/lib/font-options";
 import { fetchGenerations, greeting, type GenerationSummary } from "@/lib/generations";
+import {
+  CLIP_BRIEF_MAX_CHARS,
+  DURATION_PRESETS,
+  MIN_CLIPS_OPTIONS,
+  clampMinClipsChoice,
+  formatCapacityHint,
+  getDurationPreset,
+  loadStoredClipPrefs,
+  normalizeClipBrief,
+  presetIsFeasible,
+  saveStoredClipPrefs,
+  type DurationPresetId,
+  type MinClipsChoice,
+} from "@/lib/clip-selection";
 import { cn } from "@/lib/utils";
 import { FontSelectOption, type FontOption } from "@/components/font-select-option";
 
@@ -88,6 +103,12 @@ export default function HomeApp() {
   const [pauseThresholdMs, setPauseThresholdMs] = useState("700");
   const [removeFillerWords, setRemoveFillerWords] = useState(true);
   const [filteredWords, setFilteredWords] = useState("");
+  const [clipDurationPreset, setClipDurationPreset] = useState<DurationPresetId>("auto");
+  const [minClips, setMinClips] = useState<MinClipsChoice>("auto");
+  const [clipBrief, setClipBrief] = useState("");
+  const [sourceSeconds, setSourceSeconds] = useState<number | null>(null);
+  const [suggestedMinClips, setSuggestedMinClips] = useState<MinClipsChoice>("auto");
+  const prefsHydratedRef = useRef(false);
 
   const [recent, setRecent] = useState<GenerationSummary[] | null>(null);
   const [billingSummary, updateBillingSummary] = useBillingSummary(Boolean(session?.user?.id));
@@ -140,6 +161,60 @@ export default function HomeApp() {
       .then((tasks) => setRecent(tasks.slice(0, 8)))
       .catch((error) => { console.error("Failed to load recent generations:", error); setRecent([]); });
   }, [session?.user?.id]);
+
+  useEffect(() => {
+    if (prefsHydratedRef.current) return;
+    prefsHydratedRef.current = true;
+    const stored = loadStoredClipPrefs();
+    if (!stored) return;
+    setClipDurationPreset(stored.clipDurationPreset);
+    setMinClips(stored.minClips);
+    setSuggestedMinClips(getDurationPreset(stored.clipDurationPreset).suggestMinClips);
+    setClipBrief(stored.clipBrief);
+  }, []);
+
+  useEffect(() => {
+    saveStoredClipPrefs({ clipDurationPreset, minClips, clipBrief });
+  }, [clipDurationPreset, minClips, clipBrief]);
+
+  useEffect(() => {
+    if (!file) {
+      setSourceSeconds(null);
+      return;
+    }
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.onloadedmetadata = () => {
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        setSourceSeconds(video.duration);
+      } else {
+        setSourceSeconds(null);
+      }
+      URL.revokeObjectURL(objectUrl);
+    };
+    video.onerror = () => {
+      setSourceSeconds(null);
+      URL.revokeObjectURL(objectUrl);
+    };
+    video.src = objectUrl;
+  }, [file]);
+
+  useEffect(() => {
+    if (!file) setSourceSeconds(null);
+  }, [url, file]);
+
+  const selectDurationPreset = useCallback((presetId: DurationPresetId) => {
+    const suggestion = getDurationPreset(presetId).suggestMinClips;
+    setClipDurationPreset(presetId);
+    setMinClips((current) => {
+      if (current === "auto" || current === suggestedMinClips) {
+        return clampMinClipsChoice(suggestion, sourceSeconds, presetId);
+      }
+      return clampMinClipsChoice(current, sourceSeconds, presetId);
+    });
+    setSuggestedMinClips(suggestion);
+  }, [sourceSeconds, suggestedMinClips]);
 
   const attachFile = (next: File | null) => {
     if (next && !next.type.startsWith("video/") && !/\.(mp4|mov|avi|mkv|webm|m4v)$/i.test(next.name)) {
@@ -205,12 +280,23 @@ export default function HomeApp() {
   const hasSource = sourceType === "upload" ? Boolean(file) : Boolean(url.trim());
   const cleanupCount = [cutLongPauses, removeFillerWords, filteredWords.trim().length > 0].filter(Boolean).length;
   const customized = fontFamily !== null || fontSize !== null || fontColor !== null;
+  const capacityHint = formatCapacityHint(sourceSeconds, clipDurationPreset);
+  const effectiveMinClips = clampMinClipsChoice(minClips, sourceSeconds, clipDurationPreset);
+  const durationChipLabel = getDurationPreset(clipDurationPreset).label;
+  const minClipsChipLabel = effectiveMinClips === "auto" ? "Cortes Auto" : `Mín. ${effectiveMinClips} cortes`;
+  const normalizedBrief = normalizeClipBrief(clipBrief);
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (!hasSource || isLoading || !session?.user?.id) return;
     if (generationRequiresUpgrade) {
       openUpgrade({ kind: upgradeState?.isPaid ? "limit" : "start" });
+      return;
+    }
+    if (!presetIsFeasible(sourceSeconds, clipDurationPreset)) {
+      setError(
+        `O preset "${getDurationPreset(clipDurationPreset).label}" precisa de um vídeo com pelo menos ${Math.ceil(getDurationPreset(clipDurationPreset).minSeconds / 60)} minutos.`,
+      );
       return;
     }
 
@@ -247,6 +333,9 @@ export default function HomeApp() {
           pause_threshold_ms: normalizedPauseThreshold,
           remove_filler_words: removeFillerWords,
           filtered_words: normalizedFilteredWords,
+          clip_duration_preset: clipDurationPreset,
+          min_clips: effectiveMinClips,
+          ...(normalizedBrief ? { clip_brief: normalizedBrief } : {}),
         }),
       });
 
@@ -273,6 +362,9 @@ export default function HomeApp() {
         remove_filler_words: removeFillerWords,
         filtered_words: normalizedFilteredWords,
         processing_mode: "fast",
+        clip_duration_preset: clipDurationPreset,
+        min_clips: effectiveMinClips,
+        has_clip_brief: Boolean(normalizedBrief),
       });
       window.location.href = `/tasks/${startResult.task_id}`;
     } catch (error) {
@@ -527,6 +619,74 @@ export default function HomeApp() {
                 </PopoverContent>
               </Popover>
 
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Chip disabled={controlsDisabled} active={clipDurationPreset !== "auto"}>
+                    <Timer className="size-3.5" />{durationChipLabel}<ChevronDown className="size-3 opacity-60" />
+                  </Chip>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-[min(92vw,420px)] rounded-2xl p-3">
+                  <p className="mb-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">Duração dos cortes</p>
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Duração dos cortes">
+                    {DURATION_PRESETS.map((preset) => {
+                      const feasible = presetIsFeasible(sourceSeconds, preset.id);
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          role="radio"
+                          aria-checked={clipDurationPreset === preset.id}
+                          disabled={!feasible}
+                          onClick={() => selectDurationPreset(preset.id)}
+                          className={cn(
+                            "rounded-xl border p-3 text-left transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50",
+                            clipDurationPreset === preset.id && "border-foreground ring-1 ring-foreground",
+                          )}
+                        >
+                          <span className="block text-sm font-medium">{preset.label}</span>
+                          <span className="block text-xs text-muted-foreground">{feasible ? preset.hint : "Vídeo curto demais para este preset"}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {capacityHint && <p className="mt-3 px-1 text-xs text-muted-foreground">{capacityHint}</p>}
+                </PopoverContent>
+              </Popover>
+
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Chip disabled={controlsDisabled} active={effectiveMinClips !== "auto"}>
+                    <Clapperboard className="size-3.5" />{minClipsChipLabel}<ChevronDown className="size-3 opacity-60" />
+                  </Chip>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-[min(92vw,320px)] rounded-2xl p-3">
+                  <p className="mb-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">Quantidade mínima</p>
+                  <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Quantidade mínima de cortes">
+                    {MIN_CLIPS_OPTIONS.map((option) => {
+                      const clamped = clampMinClipsChoice(option, sourceSeconds, clipDurationPreset);
+                      const disabled = option !== "auto" && option !== clamped;
+                      return (
+                        <button
+                          key={String(option)}
+                          type="button"
+                          role="radio"
+                          aria-checked={effectiveMinClips === option || (option !== "auto" && effectiveMinClips === clamped && minClips === option)}
+                          disabled={disabled}
+                          onClick={() => setMinClips(clamped)}
+                          className={cn(
+                            "rounded-xl border px-3 py-2 text-sm font-medium transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50",
+                            (effectiveMinClips === option || (minClips === option && effectiveMinClips === clamped)) && "border-foreground ring-1 ring-foreground",
+                          )}
+                        >
+                          {option === "auto" ? "Auto" : option}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {capacityHint && <p className="mt-3 px-1 text-xs text-muted-foreground">{capacityHint}</p>}
+                </PopoverContent>
+              </Popover>
+
               <Chip onClick={() => setAddSubtitles((value) => !value)} disabled={controlsDisabled} aria-pressed={addSubtitles} active={!addSubtitles}>
                 {addSubtitles ? <Captions className="size-3.5" /> : <CaptionsOff className="size-3.5" />}
                 {addSubtitles ? "Captions" : "No captions"}
@@ -583,6 +743,22 @@ export default function HomeApp() {
                   {isLoading ? <Loader2 className="size-4 animate-spin" /> : <ArrowUp className="size-4" />}
                 </Button>
               </div>
+            </div>
+
+            <div className="space-y-1.5 border-t px-3 py-3 sm:px-4">
+              <div className="flex items-center justify-between gap-3">
+                <label htmlFor="clip-brief" className="text-xs font-medium text-muted-foreground">Brief do corte</label>
+                <span className="text-[11px] text-muted-foreground">{clipBrief.length}/{CLIP_BRIEF_MAX_CHARS}</span>
+              </div>
+              <Textarea
+                id="clip-brief"
+                value={clipBrief}
+                maxLength={CLIP_BRIEF_MAX_CHARS}
+                disabled={controlsDisabled}
+                onChange={(event) => setClipBrief(event.target.value.slice(0, CLIP_BRIEF_MAX_CHARS))}
+                placeholder="Hook forte nos primeiros segundos, não terminar no meio da ideia, tom para redes e tráfego pago…"
+                className="min-h-[72px] resize-y bg-transparent text-sm"
+              />
             </div>
           </form>
 

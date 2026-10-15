@@ -41,6 +41,12 @@ from ..clip_source_map import (
     source_range_bounds,
 )
 from ..ai import get_most_relevant_parts_by_transcript
+from ..clip_selection import (
+    ClipSelectionPrefs,
+    physical_max_clips,
+    preset_is_feasible,
+    resolve_clip_budget,
+)
 from ..config import get_config
 
 logger = logging.getLogger(__name__)
@@ -187,7 +193,11 @@ class VideoService:
         return transcript
 
     @staticmethod
-    async def analyze_transcript(transcript: str, clip_signals: Optional[str] = None) -> Any:
+    async def analyze_transcript(
+        transcript: str,
+        clip_signals: Optional[str] = None,
+        clip_prefs: ClipSelectionPrefs | None = None,
+    ) -> Any:
         """
         Analyze transcript with AI to find relevant segments.
         This is already async, no need to wrap.
@@ -196,6 +206,7 @@ class VideoService:
         relevant_parts = await get_most_relevant_parts_by_transcript(
             transcript,
             clip_signals=clip_signals,
+            prefs=clip_prefs,
         )
         logger.info(
             f"AI analysis complete: {len(relevant_parts.most_relevant_segments)} segments found"
@@ -399,6 +410,7 @@ class VideoService:
         cached_analysis_json: Optional[str] = None,
         progress_callback: Optional[Callable[[int, str, str], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], Awaitable[bool]]] = None,
+        clip_prefs: ClipSelectionPrefs | None = None,
     ) -> Dict[str, Any]:
         """
         Complete video processing pipeline.
@@ -408,6 +420,7 @@ class VideoService:
                           Signature: async def callback(progress: int, message: str, status: str)
         """
         video_path: Optional[Path] = None
+        selection = clip_prefs or ClipSelectionPrefs()
         try:
             runtime_config = get_config()
             duration_limit = (
@@ -464,6 +477,22 @@ class VideoService:
                 raise Exception(
                     f"Video is too long ({int(file_duration) // 60} min). "
                     f"Maximum allowed duration is {mins} minutes."
+                )
+            if file_duration and not preset_is_feasible(file_duration, selection):
+                raise Exception(
+                    f"Duration preset '{selection.duration_preset}' needs at least "
+                    f"{selection.min_seconds // 60} minutes of source video "
+                    f"(got about {int(file_duration // 60)} minutes)."
+                )
+            if (
+                selection.min_clips is not None
+                and file_duration
+                and selection.min_clips > physical_max_clips(file_duration, selection)
+            ):
+                selection = ClipSelectionPrefs(
+                    duration_preset=selection.duration_preset,
+                    min_clips=physical_max_clips(file_duration, selection),
+                    brief=selection.brief,
                 )
 
             # Step 2: Generate transcript
@@ -539,6 +568,7 @@ class VideoService:
                 relevant_parts = await VideoService.analyze_transcript(
                     transcript,
                     clip_signals=clip_signals,
+                    clip_prefs=selection,
                 )
 
             # Step 4: Create clips
@@ -597,9 +627,15 @@ class VideoService:
                 )
                 segments_json.append(segment_payload)
 
-            clip_limit = runtime_config.max_clips
+            server_ceiling = runtime_config.max_clips
             if processing_mode == "fast":
-                clip_limit = min(clip_limit, runtime_config.fast_mode_max_clips)
+                server_ceiling = min(server_ceiling, runtime_config.fast_mode_max_clips)
+            clip_limit = resolve_clip_budget(
+                float(file_duration or 0),
+                selection,
+                max_clips=server_ceiling,
+                absolute_ceiling=20,
+            )
             segments_json = segments_json[: max(1, clip_limit)]
 
             if not segments_json:

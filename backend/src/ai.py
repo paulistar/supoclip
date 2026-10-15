@@ -22,16 +22,23 @@ from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
+from .clip_selection import (
+    ClipSelectionPrefs,
+    parse_clip_selection_prefs,
+    resolve_clip_budget,
+    window_segment_target,
+)
 from .config import Config, get_config
 from .runtime_settings import apply_settings_to_process_env
 
 logger = logging.getLogger(__name__)
 
+# Defaults match the "auto" duration preset (used when prefs are omitted).
 IDEAL_CLIP_MIN_SECONDS = 25
 IDEAL_CLIP_MAX_SECONDS = 50
-MIN_ACCEPTED_CLIP_SECONDS = 15
+MIN_ACCEPTED_CLIP_SECONDS = 20
 MAX_ACCEPTED_CLIP_SECONDS = 60
-TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v6"
+TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v7-clip-prefs"
 TRANSCRIPT_ANALYSIS_MAX_ATTEMPTS = 3
 TRANSCRIPT_ANALYSIS_TIMEOUT_SECONDS = 600
 # Long transcripts are analysed in overlapping windows so every part of the
@@ -325,7 +332,7 @@ OUTPUT CONTRACT:
 - Each item in "most_relevant_segments" must include: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", and "hook_title".
 - Do not use "segment" as an output field. Use "text".
 - "virality" must include: "hook_score", "engagement_score", "value_score", "shareability_score", "total_score", "hook_type", and "virality_reasoning".
-- Every returned segment must be 15-60 seconds long. Prefer 25-50 seconds.
+- Default clip length is 20-60 seconds. Prefer 25-50 seconds unless the task prompt overrides the duration bounds.
 
 CORE OBJECTIVES:
 1. Identify segments that would be compelling on social media platforms
@@ -424,22 +431,21 @@ Identify 2-4 moments in each segment where B-roll footage could enhance the vide
 - Use simple, searchable keywords (e.g., "coffee shop", "laptop coding", "money stack")
 
 TIMING GUIDELINES:
-- Target 25-50 seconds for most clips
-- Use 15-24 seconds only when the moment is exceptionally dense, self-contained, and complete
-- CRITICAL: start_time MUST be different from end_time (minimum 15 seconds apart)
+- Obey the min/max/ideal durations stated in each task prompt
+- Default when unspecified: target 25-50 seconds; accept 20-60
+- CRITICAL: start_time MUST be different from end_time
 - Focus on natural content boundaries rather than arbitrary time limits
 - Include enough context for the segment to be understandable
-- Prefer roughly 30-50 seconds when possible
 - Start at the hook or the minimum setup needed to make the hook land, and end after the payoff
 - If a highlight is only one good line, expand to include the surrounding setup and payoff rather than returning a tiny fragment
 - Stop expanding when the topic drifts, the speaker repeats the same point, or the clip loses momentum
+- Never start mid-thought or end abruptly mid-idea when contiguous transcript can complete the arc
 
 TIMESTAMP REQUIREMENTS - EXTREMELY IMPORTANT:
 - Use EXACT timestamps as they appear in the transcript
 - Never modify timestamp format (keep MM:SS structure)
 - start_time MUST be LESS THAN end_time (start_time < end_time)
-- MINIMUM segment duration: 15 seconds (end_time - start_time >= 15 seconds)
-- IDEAL segment duration: 25-50 seconds
+- Respect the MINIMUM and MAXIMUM segment durations from the task prompt
 - Look at transcript ranges like [02:25 - 02:35] and use different start/end times
 - NEVER use the same timestamp for both start_time and end_time
 - Example: start_time: "02:25", end_time: "02:35" (NOT "02:25" and "02:25")
@@ -449,8 +455,9 @@ SCORING AND OUTPUT RULES:
 - Penalize clips that are only quotable but not self-contained, too generic, missing setup, missing payoff, or padded with filler
 - virality_reasoning and reasoning should cite what is actually present in the chosen span
 - summary and key_topics must also stay grounded in the transcript and should not add outside interpretation
+- When a user brief is provided in the task prompt, treat it as editorial priority for social/paid use while staying grounded
 
-Find the number of compelling segments requested in the task (usually 2-5) that would work well as standalone clips. Quality over quantity: choose fewer stronger segments over filling a quota. Every selected segment must be accurate, self-contained, have proper time ranges, and score high on virality metrics."""
+Find the number of compelling segments requested in the task that would work well as standalone clips. Prefer meeting the requested count with strong clips; do not pad with weak filler. Every selected segment must be accurate, self-contained, have proper time ranges, and score high on virality metrics."""
 
 # Lazy-loaded agent to avoid import-time failures when API keys aren't set
 _transcript_agent: Optional[Agent[None, TranscriptAnalysis]] = None
@@ -708,12 +715,20 @@ def build_transcript_analysis_prompt(
     include_broll: bool = False,
     clip_signals: str | None = None,
     window: tuple[int, int] | None = None,
+    prefs: ClipSelectionPrefs | None = None,
+    clip_budget: int | None = None,
 ) -> str:
     """Build the grounded task prompt for transcript analysis.
 
     ``window`` marks the prompt as one (start, end) slice of a longer source.
     """
-    segment_target = ANALYSIS_WINDOW_SEGMENT_TARGET if window else "2-5"
+    selection = prefs or ClipSelectionPrefs()
+    budget = max(1, int(clip_budget or 5))
+    segment_target = window_segment_target(budget, windowed=window is not None)
+    min_s = selection.min_seconds
+    max_s = selection.max_seconds
+    ideal_min = selection.ideal_min
+    ideal_max = selection.ideal_max
     window_note = ""
     if window:
         window_note = (
@@ -734,6 +749,15 @@ def build_transcript_analysis_prompt(
             "Use these as hints only. They should influence ranking, but every final segment "
             "must still be a coherent contiguous transcript range."
         )
+    brief_section = ""
+    if selection.brief:
+        brief_section = (
+            "\n\nUser brief (editorial priority for this generation — reinforce, do not invent):\n"
+            f"{selection.brief}\n\n"
+            "Apply this brief while staying fully grounded in the transcript. Prioritize strong "
+            "hooks for scroll-stopping social/paid use, complete context, and endings that do not "
+            "cut mid-thought."
+        )
 
     return f"""Analyze this video transcript and identify the most engaging segments for short-form content.
 {window_note}
@@ -748,12 +772,15 @@ Follow this workflow:
 4. For each chosen segment, use the earliest timestamp in the selected range as start_time and the latest timestamp in the selected range as end_time.{broll_instruction}
 
 Selection target:
-- Choose {segment_target} segments total.
-- Most selected clips should be 25-50 seconds.
-- Only choose a 15-24 second clip when it already contains a full setup and payoff.
-- If a strong moment is shorter than 25 seconds, first try expanding to nearby contiguous transcript lines that add useful context.
+- Choose {segment_target} segments total (aim to support a final budget near {budget} clips for the whole video).
+- Most selected clips should be {ideal_min}-{ideal_max} seconds.
+- Accepted duration range for this run: {min_s}-{max_s} seconds.
+- Only choose a clip near the minimum when it already contains a full setup and payoff.
+- If a strong moment is shorter than {ideal_min} seconds, first try expanding to nearby contiguous transcript lines that add useful context.
 - Skip weak standalone picks: intros, sponsor reads, CTAs, contextless quotes, repeated points, vague setup, and answer fragments that require prior context.
 - Before returning a segment, ask whether a viewer would understand and care without seeing the rest of the source video.
+- Do not start without a hook or end abruptly mid-idea when contiguous lines can complete the arc.
+{brief_section}
 
 Critical accuracy requirements:
 - Do not fabricate or embellish content.
@@ -773,7 +800,7 @@ JSON-only output requirements:
 - Optional segment keys "hook_start_time"/"hook_end_time": MM:SS range of the strongest 2-5 second line later in the segment (cold-open teaser), or null.
 - "hook_title" is a 3-9 word plain-text headline for the clip, in the transcript's language, grounded in the segment (no hashtags, emojis, or quotes).
 - Virality keys: "hook_score", "engagement_score", "value_score", "shareability_score", "total_score", "hook_type", "virality_reasoning".
-- Do not return segments shorter than {MIN_ACCEPTED_CLIP_SECONDS} seconds or longer than {MAX_ACCEPTED_CLIP_SECONDS} seconds.
+- Do not return segments shorter than {min_s} seconds or longer than {max_s} seconds.
 
 Transcript:
 {transcript}"""
@@ -899,32 +926,39 @@ def _extract_transcript_text(
 
 
 def _choose_repaired_bounds(
-    transcript_spans: list[dict[str, Any]], start_seconds: int, end_seconds: int
+    transcript_spans: list[dict[str, Any]],
+    start_seconds: int,
+    end_seconds: int,
+    prefs: ClipSelectionPrefs | None = None,
 ) -> tuple[int, int] | None:
     """Repair model-selected bounds to the nearest acceptable contiguous range."""
     if not transcript_spans:
         return None
 
+    selection = prefs or ClipSelectionPrefs()
+    min_s = selection.min_seconds
+    max_s = selection.max_seconds
+    ideal_min = selection.ideal_min
+    ideal_max = selection.ideal_max
+
     starts = sorted({span["start"] for span in transcript_spans})
     ends = sorted({span["end"] for span in transcript_spans})
     current_duration = end_seconds - start_seconds
 
-    if current_duration > MAX_ACCEPTED_CLIP_SECONDS:
-        target_end = start_seconds + IDEAL_CLIP_MAX_SECONDS
+    if current_duration > max_s:
+        target_end = start_seconds + ideal_max
         candidate_ends = [
             candidate
             for candidate in ends
-            if start_seconds + MIN_ACCEPTED_CLIP_SECONDS
-            <= candidate
-            <= min(target_end, end_seconds)
+            if start_seconds + min_s <= candidate <= min(target_end, end_seconds)
         ]
         if candidate_ends:
             return start_seconds, max(candidate_ends)
-        if start_seconds + MIN_ACCEPTED_CLIP_SECONDS <= target_end:
+        if start_seconds + min_s <= target_end:
             return start_seconds, target_end
         return None
 
-    if current_duration < MIN_ACCEPTED_CLIP_SECONDS:
+    if current_duration < min_s:
         candidate_ranges: list[tuple[int, int, int]] = []
         for candidate_start in starts:
             if candidate_start > start_seconds:
@@ -933,15 +967,15 @@ def _choose_repaired_bounds(
                 if candidate_end < end_seconds:
                     continue
                 duration = candidate_end - candidate_start
-                if MIN_ACCEPTED_CLIP_SECONDS <= duration <= MAX_ACCEPTED_CLIP_SECONDS:
+                if min_s <= duration <= max_s:
                     extra_context = (start_seconds - candidate_start) + (
                         candidate_end - end_seconds
                     )
                     ideal_penalty = 0
-                    if duration < IDEAL_CLIP_MIN_SECONDS:
-                        ideal_penalty = IDEAL_CLIP_MIN_SECONDS - duration
-                    elif duration > IDEAL_CLIP_MAX_SECONDS:
-                        ideal_penalty = duration - IDEAL_CLIP_MAX_SECONDS
+                    if duration < ideal_min:
+                        ideal_penalty = ideal_min - duration
+                    elif duration > ideal_max:
+                        ideal_penalty = duration - ideal_max
                     candidate_ranges.append(
                         (ideal_penalty * 1000 + extra_context, candidate_start, candidate_end)
                     )
@@ -957,12 +991,14 @@ def _repair_segment_bounds(
     transcript_spans: list[dict[str, Any]],
     start_seconds: int,
     end_seconds: int,
+    prefs: ClipSelectionPrefs | None = None,
 ) -> tuple[int, int] | None:
     """Adjust near-miss model ranges to usable transcript-aligned bounds."""
     repaired_bounds = _choose_repaired_bounds(
         transcript_spans,
         start_seconds,
         end_seconds,
+        prefs=prefs,
     )
     if not repaired_bounds:
         return None
@@ -1191,10 +1227,37 @@ def dedupe_overlapping_segments(
 
 
 def max_final_clips_for_duration(
-    source_seconds: float, max_clips: int = MAX_FINAL_CLIPS
+    source_seconds: float,
+    max_clips: int = MAX_FINAL_CLIPS,
+    *,
+    prefs: ClipSelectionPrefs | None = None,
+    min_clips: int | None = None,
+    duration_preset: str | None = None,
 ) -> int:
-    """Scale the clip budget with source length (about one clip per 5 minutes),
-    never above ``max_clips`` (the configured MAX_CLIPS)."""
+    """Scale the clip budget with source length and optional selection prefs.
+
+    Without prefs, preserves the legacy density (~1 clip / 5 minutes, floor 5).
+    With prefs, uses preset-aware Auto density or an explicit min_clips floor,
+    clamped by physical fit and ``max_clips``.
+    """
+    if prefs is not None or min_clips is not None or duration_preset is not None:
+        selection = prefs or parse_clip_selection_prefs(
+            duration_preset=duration_preset or "auto",
+            min_clips=min_clips,
+        )
+        if min_clips is not None and prefs is not None and prefs.min_clips is None:
+            selection = ClipSelectionPrefs(
+                duration_preset=selection.duration_preset,
+                min_clips=min_clips,
+                brief=selection.brief,
+            )
+        return resolve_clip_budget(
+            source_seconds,
+            selection,
+            max_clips=max_clips,
+            absolute_ceiling=MAX_FINAL_CLIPS,
+        )
+
     ceiling = max(1, min(MAX_FINAL_CLIPS, max_clips))
     return max(
         min(MIN_FINAL_CLIPS, ceiling),
@@ -1300,12 +1363,15 @@ async def _analyze_transcript_windows(
     windows: List[Dict[str, Any]],
     include_broll: bool,
     clip_signals: Optional[str],
+    prefs: ClipSelectionPrefs | None = None,
+    clip_budget: int | None = None,
 ) -> List[TranscriptAnalysis]:
     """Analyse windows with bounded concurrency, tolerating some failures.
 
     Raises the first window error only when no window produced an analysis.
     """
     semaphore = asyncio.Semaphore(ANALYSIS_WINDOW_CONCURRENCY)
+    selection = prefs or ClipSelectionPrefs()
 
     async def run_window(window: Dict[str, Any]) -> TranscriptAnalysis:
         async with semaphore:
@@ -1316,6 +1382,8 @@ async def _analyze_transcript_windows(
                     clip_signals, window["start"], window["end"]
                 ),
                 window=(window["start"], window["end"]),
+                prefs=selection,
+                clip_budget=clip_budget,
             )
             result = await _run_transcript_analysis(agent, prompt)
             return result.output
@@ -1393,8 +1461,12 @@ def _validate_segments(
     segments: List[TranscriptSegment],
     transcript_lines: List[Dict[str, Any]],
     transcript_spans: List[Dict[str, Any]],
+    prefs: ClipSelectionPrefs | None = None,
 ) -> List[TranscriptSegment]:
     """Ground model segments onto real transcript lines and drop unusable ones."""
+    selection = prefs or ClipSelectionPrefs()
+    min_s = selection.min_seconds
+    max_s = selection.max_seconds
     validated_segments: List[TranscriptSegment] = []
     for segment in segments:
         # Validate text content
@@ -1420,12 +1492,13 @@ def _validate_segments(
             )
             duration = end_seconds - start_seconds
 
-            if duration < MIN_ACCEPTED_CLIP_SECONDS or duration > MAX_ACCEPTED_CLIP_SECONDS:
+            if duration < min_s or duration > max_s:
                 repaired_bounds = _repair_segment_bounds(
                     segment,
                     transcript_spans,
                     start_seconds,
                     end_seconds,
+                    prefs=selection,
                 )
                 if repaired_bounds:
                     # Repairs format hours as HH:MM:SS; snap back onto line labels.
@@ -1440,15 +1513,15 @@ def _validate_segments(
                 )
                 continue
 
-            if duration < MIN_ACCEPTED_CLIP_SECONDS:
+            if duration < min_s:
                 logger.warning(
-                    f"Skipping segment too short: {duration}s (min {MIN_ACCEPTED_CLIP_SECONDS}s required)"
+                    f"Skipping segment too short: {duration}s (min {min_s}s required)"
                 )
                 continue
 
-            if duration > MAX_ACCEPTED_CLIP_SECONDS:
+            if duration > max_s:
                 logger.warning(
-                    f"Skipping segment too long: {duration}s (max {MAX_ACCEPTED_CLIP_SECONDS}s allowed)"
+                    f"Skipping segment too long: {duration}s (max {max_s}s allowed)"
                 )
                 continue
 
@@ -1525,7 +1598,10 @@ def _merge_key_topics(analyses: List[TranscriptAnalysis], limit: int = 12) -> Li
 
 
 async def get_most_relevant_parts_by_transcript(
-    transcript: str, include_broll: bool = False, clip_signals: str | None = None
+    transcript: str,
+    include_broll: bool = False,
+    clip_signals: str | None = None,
+    prefs: ClipSelectionPrefs | None = None,
 ) -> TranscriptAnalysis:
     """Get the most relevant parts of a transcript with virality scoring and optional B-roll detection.
 
@@ -1533,8 +1609,14 @@ async def get_most_relevant_parts_by_transcript(
     overlapping windows analysed concurrently, then deduplicated and reranked
     in one comparative call so scores are comparable across windows.
     """
+    selection = prefs or ClipSelectionPrefs()
     logger.info(
-        f"Starting AI analysis of transcript ({len(transcript)} chars), include_broll={include_broll}"
+        "Starting AI analysis of transcript (%s chars), include_broll=%s, preset=%s, min_clips=%s, brief=%s",
+        len(transcript),
+        include_broll,
+        selection.duration_preset,
+        selection.min_clips if selection.min_clips is not None else "auto",
+        bool(selection.brief),
     )
 
     try:
@@ -1542,6 +1624,14 @@ async def get_most_relevant_parts_by_transcript(
         transcript_lines = _parse_transcript_lines(transcript)
         transcript_spans = _parse_transcript_spans(transcript)
         windows = split_transcript_into_windows(transcript)
+        source_seconds = max(
+            (line["end_seconds"] for line in transcript_lines), default=0
+        )
+        clip_budget = max_final_clips_for_duration(
+            source_seconds,
+            get_config().max_clips,
+            prefs=selection,
+        )
 
         if len(windows) == 1:
             result = await _run_transcript_analysis(
@@ -1550,13 +1640,20 @@ async def get_most_relevant_parts_by_transcript(
                     transcript=transcript,
                     include_broll=include_broll,
                     clip_signals=clip_signals,
+                    prefs=selection,
+                    clip_budget=clip_budget,
                 )
             )
             analyses = [result.output]
         else:
             logger.info("Analysing transcript in %d overlapping windows", len(windows))
             analyses = await _analyze_transcript_windows(
-                agent, windows, include_broll, clip_signals
+                agent,
+                windows,
+                include_broll,
+                clip_signals,
+                prefs=selection,
+                clip_budget=clip_budget,
             )
 
         candidates: List[TranscriptSegment] = []
@@ -1566,7 +1663,10 @@ async def get_most_relevant_parts_by_transcript(
             )
             candidates.extend(
                 _validate_segments(
-                    analysis.most_relevant_segments, transcript_lines, transcript_spans
+                    analysis.most_relevant_segments,
+                    transcript_lines,
+                    transcript_spans,
+                    prefs=selection,
                 )
             )
 
@@ -1576,12 +1676,7 @@ async def get_most_relevant_parts_by_transcript(
         if len(windows) > 1:
             candidates = await rerank_candidates(candidates)
 
-        source_seconds = max(
-            (line["end_seconds"] for line in transcript_lines), default=0
-        )
-        validated_segments = candidates[
-            : max_final_clips_for_duration(source_seconds, get_config().max_clips)
-        ]
+        validated_segments = candidates[:clip_budget]
 
         broll_opportunities = None
         if include_broll:

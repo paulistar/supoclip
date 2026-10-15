@@ -41,6 +41,12 @@ from ...clip_cleanup import (
     normalize_clip_cleanup_settings,
     updated_cleanup_settings,
 )
+from ...clip_selection import (
+    ClipSelectionPrefs,
+    parse_clip_selection_prefs,
+    physical_max_clips,
+    preset_is_feasible,
+)
 from ...video_utils import VALID_OUTPUT_FORMATS
 from ...admin_auth import require_admin_user
 import redis.asyncio as redis
@@ -238,6 +244,7 @@ def _merge_task_source_metadata(
     output_format: Any = None,
     add_subtitles: Any = None,
     cleanup_settings: Dict[str, Any] | None = None,
+    clip_selection: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     merged = dict(existing or {})
 
@@ -251,6 +258,10 @@ def _merge_task_source_metadata(
         merged["add_subtitles"] = add_subtitles
     if cleanup_settings:
         merged.update(cleanup_settings)
+    if clip_selection:
+        merged.update(clip_selection)
+        if not clip_selection.get("clip_brief"):
+            merged.pop("clip_brief", None)
 
     return merged
 
@@ -368,6 +379,14 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     if not isinstance(add_subtitles, bool):
         add_subtitles = True
     cleanup_settings = new_task_cleanup_settings(data)
+    try:
+        clip_prefs = parse_clip_selection_prefs(
+            duration_preset=data.get("clip_duration_preset"),
+            min_clips=data.get("min_clips"),
+            clip_brief=data.get("clip_brief"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
 
@@ -384,11 +403,32 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             else raw_source["url"]
         )
         source_title = raw_source.get("title")
+        source_duration_seconds: float | None = None
         if source_type == "youtube":
             metadata = await _preflight_youtube_source(
                 source_url, billing["max_youtube_duration_seconds"]
             )
             source_title = source_title or metadata.get("title") or "YouTube Video"
+            duration_value = metadata.get("duration")
+            if isinstance(duration_value, (int, float)) and duration_value > 0:
+                source_duration_seconds = float(duration_value)
+            if not preset_is_feasible(source_duration_seconds, clip_prefs):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Duration preset '{clip_prefs.duration_preset}' needs at least "
+                        f"{clip_prefs.min_seconds // 60} minutes of source video "
+                        f"(got about {int((source_duration_seconds or 0) // 60)} minutes)."
+                    ),
+                )
+            if clip_prefs.min_clips is not None and source_duration_seconds is not None:
+                fit = physical_max_clips(source_duration_seconds, clip_prefs)
+                if clip_prefs.min_clips > fit:
+                    clip_prefs = ClipSelectionPrefs(
+                        duration_preset=clip_prefs.duration_preset,
+                        min_clips=fit,
+                        brief=clip_prefs.brief,
+                    )
 
         async with generation_allowance_guard(
             db, user_id, enabled=runtime_config.monetization_enabled
@@ -419,6 +459,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                         output_format=output_format,
                         add_subtitles=add_subtitles,
                         cleanup_settings=cleanup_settings,
+                        clip_selection=clip_prefs.to_metadata(),
                     ),
                     db=db,
                 )
