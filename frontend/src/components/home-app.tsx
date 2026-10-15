@@ -83,7 +83,7 @@ export default function HomeApp() {
   const [captionTemplate, setCaptionTemplate] = useState("default");
   const [availableTemplates, setAvailableTemplates] = useState<CaptionTemplate[]>([]);
   const [outputFormat, setOutputFormat] = useState<OutputFormat>("vertical");
-  const [addSubtitles, setAddSubtitles] = useState(true);
+  const [addSubtitles, setAddSubtitles] = useState(false);
   const [cutLongPauses, setCutLongPauses] = useState(true);
   const [pauseThresholdMs, setPauseThresholdMs] = useState("700");
   const [removeFillerWords, setRemoveFillerWords] = useState(true);

@@ -30,7 +30,11 @@ from ...auth_headers import resolve_authenticated_user_id
 from ...workers.job_queue import JobQueue
 from ...workers.progress import ProgressTracker
 from ...config import get_config
-from ...youtube_utils import async_get_youtube_video_info
+from ...youtube_utils import (
+    _agent_debug_log,
+    async_get_youtube_video_info,
+    sanitize_youtube_url,
+)
 from ...font_registry import is_font_accessible
 from ...clip_cleanup import (
     new_task_cleanup_settings,
@@ -48,15 +52,45 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 async def _preflight_youtube_source(url: str, duration_limit: int) -> Dict[str, Any]:
     """Check duration before creating a task or consuming a generation."""
+    clean_url = sanitize_youtube_url(url)
+    # #region agent log
+    _agent_debug_log(
+        "D",
+        "tasks.py:_preflight_youtube_source",
+        "preflight start",
+        {
+            "rawLen": len(url or ""),
+            "cleanLen": len(clean_url or ""),
+            "sanitized": clean_url != (url or "").strip(),
+            "durationLimit": duration_limit,
+        },
+    )
+    # #endregion
     try:
         # Allow proxy fallbacks when the host IP is bot-blocked by YouTube.
-        metadata = await asyncio.wait_for(async_get_youtube_video_info(url), timeout=90)
+        # Keep under 90s; yt-dlp itself now enforces a tighter internal budget so
+        # Data API fallback can still run before this wait_for cancels the call.
+        metadata = await asyncio.wait_for(
+            async_get_youtube_video_info(clean_url), timeout=90
+        )
         duration = (metadata or {}).get("duration")
         if isinstance(duration, bool) or not isinstance(duration, (int, float)):
             raise ValueError("Missing video duration")
         if not math.isfinite(duration) or duration <= 0:
             raise ValueError("Invalid video duration")
-    except Exception:
+    except Exception as exc:
+        # #region agent log
+        _agent_debug_log(
+            "F",
+            "tasks.py:_preflight_youtube_source",
+            "preflight failed",
+            {
+                "errorType": type(exc).__name__,
+                "error": str(exc)[:220],
+                "timedOut": isinstance(exc, asyncio.TimeoutError),
+            },
+        )
+        # #endregion
         raise HTTPException(
             status_code=503,
             detail={
@@ -68,6 +102,14 @@ async def _preflight_youtube_source(url: str, duration_limit: int) -> Dict[str, 
             },
         ) from None
 
+    # #region agent log
+    _agent_debug_log(
+        "C",
+        "tasks.py:_preflight_youtube_source",
+        "preflight success",
+        {"duration": duration, "videoId": (metadata or {}).get("id")},
+    )
+    # #endregion
     if duration > duration_limit:
         raise HTTPException(
             status_code=422,

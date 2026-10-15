@@ -5,6 +5,7 @@ Optimized for free yt-dlp downloads with optional Apify fallback.
 
 import asyncio
 from datetime import datetime
+import json
 import logging
 import os
 import re
@@ -14,7 +15,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -32,6 +33,46 @@ YOUTUBE_METADATA_PROVIDER_DATA_API = "youtube_data_api"
 YOUTUBE_DOWNLOAD_PROVIDER_YTDLP = "yt_dlp"
 YOUTUBE_DOWNLOAD_PROVIDER_APIFY = "apify"
 YOUTUBE_DATA_API_URL = "https://www.googleapis.com/youtube/v3/videos"
+# Preflight API wait_for is 90s; keep yt-dlp proxy loops under this so Data API
+# fallback (or a clean 503) can still run inside the request budget.
+YTDLP_METADATA_DEADLINE_SECONDS = float(
+    os.environ.get("YTDLP_METADATA_DEADLINE_SECONDS", "50")
+)
+YTDLP_METADATA_MAX_PROXIES = int(os.environ.get("YTDLP_METADATA_MAX_PROXIES", "4"))
+YTDLP_METADATA_PROXY_SOCKET_TIMEOUT = int(
+    os.environ.get("YTDLP_METADATA_PROXY_SOCKET_TIMEOUT", "8")
+)
+
+
+def _agent_debug_log(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: Optional[Dict[str, Any]] = None,
+    run_id: str = "pre-fix",
+) -> None:
+    # #region agent log
+    payload = {
+        "sessionId": "b6de1b",
+        "runId": run_id,
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data or {},
+        "timestamp": int(time.time() * 1000),
+    }
+    line = json.dumps(payload, ensure_ascii=True) + "\n"
+    for path in (
+        Path("/app/cookies/debug-b6de1b.log"),
+        Path("/tmp/debug-b6de1b.log"),
+    ):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+        except OSError:
+            continue
+    # #endregion
 
 
 class YouTubeDownloader:
@@ -498,21 +539,65 @@ def validate_youtube_url(url: str) -> bool:
     return video_id is not None
 
 
-def _fetch_video_info_with_ytdlp(url: str) -> Dict[str, Any]:
+def _fetch_video_info_with_ytdlp(
+    url: str,
+    deadline_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
     url = sanitize_youtube_url(url)
     video_id = get_youtube_video_id(url)
     if not video_id:
         raise ValueError(f"Invalid YouTube URL: {url}")
 
     last_error: Optional[Exception] = None
+    started = time.monotonic()
+    budget = (
+        YTDLP_METADATA_DEADLINE_SECONDS
+        if deadline_seconds is None
+        else max(5.0, float(deadline_seconds))
+    )
     # Cap public-proxy attempts so preflight stays within the API timeout budget.
     # Prefer proxy first on bot-blocked datacenter IPs so preflight
     # does not burn the API timeout on a doomed direct attempt + dead proxies.
-    proxy_candidates = _iter_ytdlp_proxies(include_direct=True, prefer_proxy=True)[:8]
+    proxy_candidates = _iter_ytdlp_proxies(
+        include_direct=True, prefer_proxy=True
+    )[: max(1, YTDLP_METADATA_MAX_PROXIES)]
+    # #region agent log
+    _agent_debug_log(
+        "B",
+        "youtube_utils.py:_fetch_video_info_with_ytdlp",
+        "ytdlp metadata start",
+        {
+            "videoId": video_id,
+            "proxyCount": len(proxy_candidates),
+            "budgetSeconds": budget,
+            "firstProxy": proxy_candidates[0] if proxy_candidates else None,
+        },
+    )
+    # #endregion
     for proxy in proxy_candidates:
+        elapsed = time.monotonic() - started
+        if elapsed >= budget:
+            last_error = TimeoutError(
+                f"yt-dlp metadata budget exhausted after {elapsed:.1f}s for {video_id}"
+            )
+            # #region agent log
+            _agent_debug_log(
+                "F",
+                "youtube_utils.py:_fetch_video_info_with_ytdlp",
+                "ytdlp metadata budget exhausted",
+                {"videoId": video_id, "elapsedSeconds": round(elapsed, 2)},
+            )
+            # #endregion
+            break
         ydl_opts = _build_info_options(proxy=proxy)
+        remaining = max(3.0, budget - elapsed)
         if proxy is not None:
-            ydl_opts["socket_timeout"] = 15
+            ydl_opts["socket_timeout"] = min(
+                YTDLP_METADATA_PROXY_SOCKET_TIMEOUT, int(remaining)
+            )
+            ydl_opts["retries"] = 0
+        else:
+            ydl_opts["socket_timeout"] = min(20, int(remaining))
             ydl_opts["retries"] = 0
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -520,6 +605,19 @@ def _fetch_video_info_with_ytdlp(url: str) -> Dict[str, Any]:
             if proxy:
                 _write_cached_proxy(proxy)
                 logger.info("YouTube metadata via proxy succeeded for %s", video_id)
+            # #region agent log
+            _agent_debug_log(
+                "B",
+                "youtube_utils.py:_fetch_video_info_with_ytdlp",
+                "ytdlp metadata success",
+                {
+                    "videoId": video_id,
+                    "via": proxy or "direct",
+                    "duration": info.get("duration"),
+                    "elapsedSeconds": round(time.monotonic() - started, 2),
+                },
+            )
+            # #endregion
             return {
                 "id": info.get("id"),
                 "title": info.get("title"),
@@ -545,6 +643,20 @@ def _fetch_video_info_with_ytdlp(url: str) -> Dict[str, Any]:
                 proxy or "direct",
                 exc,
             )
+            # #region agent log
+            _agent_debug_log(
+                "A" if _is_youtube_bot_block_error(exc) else "B",
+                "youtube_utils.py:_fetch_video_info_with_ytdlp",
+                "ytdlp metadata attempt failed",
+                {
+                    "videoId": video_id,
+                    "via": proxy or "direct",
+                    "botBlock": _is_youtube_bot_block_error(exc),
+                    "errorType": type(exc).__name__,
+                    "error": str(exc)[:220],
+                },
+            )
+            # #endregion
             continue
 
     if last_error:
@@ -620,25 +732,70 @@ async def async_get_youtube_video_info(
     return await asyncio.to_thread(get_youtube_video_info, url, task_id)
 
 
+def _metadata_provider_chain(config) -> List[str]:
+    """Prefer Data API when a key exists so preflight does not depend on free proxies."""
+    has_data_api_key = bool(config.resolve_youtube_data_api_key())
+    configured = config.youtube_metadata_provider
+    if has_data_api_key:
+        if configured == YOUTUBE_METADATA_PROVIDER_DATA_API:
+            return [
+                YOUTUBE_METADATA_PROVIDER_DATA_API,
+                YOUTUBE_METADATA_PROVIDER_YTDLP,
+            ]
+        # Key present: still try Data API first (fast + durable), then yt-dlp.
+        return [
+            YOUTUBE_METADATA_PROVIDER_DATA_API,
+            YOUTUBE_METADATA_PROVIDER_YTDLP,
+        ]
+    if configured == YOUTUBE_METADATA_PROVIDER_DATA_API:
+        return [
+            YOUTUBE_METADATA_PROVIDER_DATA_API,
+            YOUTUBE_METADATA_PROVIDER_YTDLP,
+        ]
+    return [
+        YOUTUBE_METADATA_PROVIDER_YTDLP,
+        YOUTUBE_METADATA_PROVIDER_DATA_API,
+    ]
+
+
 def get_youtube_video_info(
     url: str,
     task_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     del task_id  # Reserved for future provider-specific tracing.
 
+    raw_url = url
+    url = sanitize_youtube_url(url)
     video_id = get_youtube_video_id(url)
     if not video_id:
         logger.error("Invalid YouTube URL: %s", url)
+        # #region agent log
+        _agent_debug_log(
+            "D",
+            "youtube_utils.py:get_youtube_video_info",
+            "invalid youtube url after sanitize",
+            {"rawLen": len(raw_url or ""), "cleanLen": len(url or "")},
+        )
+        # #endregion
         return None
 
     config = get_config()
-    primary_provider = config.youtube_metadata_provider
-    secondary_provider = (
-        YOUTUBE_METADATA_PROVIDER_DATA_API
-        if primary_provider == YOUTUBE_METADATA_PROVIDER_YTDLP
-        else YOUTUBE_METADATA_PROVIDER_YTDLP
+    providers = _metadata_provider_chain(config)
+    has_key = bool(config.resolve_youtube_data_api_key())
+    # #region agent log
+    _agent_debug_log(
+        "C",
+        "youtube_utils.py:get_youtube_video_info",
+        "metadata provider chain",
+        {
+            "videoId": video_id,
+            "providers": providers,
+            "hasDataApiKey": has_key,
+            "configuredProvider": config.youtube_metadata_provider,
+            "urlSanitized": raw_url != url,
+        },
     )
-    providers = [primary_provider, secondary_provider]
+    # #endregion
     last_error: Optional[Exception] = None
 
     for index, provider in enumerate(providers):
@@ -660,24 +817,52 @@ def get_youtube_video_info(
                     video_id,
                     provider,
                 )
+            # #region agent log
+            _agent_debug_log(
+                "C",
+                "youtube_utils.py:get_youtube_video_info",
+                "metadata fetch success",
+                {
+                    "videoId": video_id,
+                    "provider": provider,
+                    "duration": (video_info or {}).get("duration"),
+                    "index": index,
+                },
+            )
+            # #endregion
             return video_info
         except Exception as exc:
             last_error = exc
-            if index == 0:
+            next_provider = providers[index + 1] if index + 1 < len(providers) else None
+            if next_provider:
                 logger.warning(
-                    "Primary YouTube metadata provider %s failed for %s: %s. Trying %s.",
+                    "YouTube metadata provider %s failed for %s: %s. Trying %s.",
                     provider,
                     video_id,
                     exc,
-                    secondary_provider,
+                    next_provider,
                 )
             else:
                 logger.warning(
-                    "Fallback YouTube metadata provider %s failed for %s: %s",
+                    "YouTube metadata provider %s failed for %s: %s",
                     provider,
                     video_id,
                     exc,
                 )
+            # #region agent log
+            _agent_debug_log(
+                "C",
+                "youtube_utils.py:get_youtube_video_info",
+                "metadata provider failed",
+                {
+                    "videoId": video_id,
+                    "provider": provider,
+                    "error": str(exc)[:220],
+                    "nextProvider": next_provider,
+                    "missingApiKey": "Missing YOUTUBE_DATA_API_KEY" in str(exc),
+                },
+            )
+            # #endregion
 
     if last_error:
         logger.warning("YouTube video info fetch failed for %s: %s", video_id, last_error)
