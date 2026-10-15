@@ -378,10 +378,15 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
         task_service = TaskService(db)
 
         source_type = task_service.video_service.determine_source_type(raw_source["url"])
+        source_url = (
+            sanitize_youtube_url(raw_source["url"])
+            if source_type == "youtube"
+            else raw_source["url"]
+        )
         source_title = raw_source.get("title")
         if source_type == "youtube":
             metadata = await _preflight_youtube_source(
-                raw_source["url"], billing["max_youtube_duration_seconds"]
+                source_url, billing["max_youtube_duration_seconds"]
             )
             source_title = source_title or metadata.get("title") or "YouTube Video"
 
@@ -392,7 +397,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             # Create task
             task_id = await task_service.create_task_with_source(
                 user_id=user_id,
-                url=raw_source["url"],
+                url=source_url,
                 title=source_title,
                 font_family=font_family,
                 font_size=font_size,
@@ -409,7 +414,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                     task_id,
                     _merge_task_source_metadata(
                         {"processing_job_id": processing_job_id},
-                        source_url=raw_source["url"],
+                        source_url=source_url,
                         source_type=source_type,
                         output_format=output_format,
                         add_subtitles=add_subtitles,
@@ -424,7 +429,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                     "process_video_task",
                     processing_mode,
                     task_id,
-                    raw_source["url"],
+                    source_url,
                     source_type,
                     user_id,
                     font_family,

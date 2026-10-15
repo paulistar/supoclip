@@ -540,26 +540,54 @@ def _get_local_video_dimensions(path: Path) -> tuple[int, int]:
         return (0, 0)
 
 
-def _remove_cached_downloads(temp_dir: Path, video_id: str) -> None:
-    cached_files = [
+def _find_complete_cached_download(temp_dir: Path, video_id: str) -> Optional[Path]:
+    """Return a reusable complete media file for video_id, if one exists."""
+    candidates = [
         file_path
         for file_path in temp_dir.glob(f"{video_id}.*")
         if file_path.is_file()
         and file_path.suffix.lower() in [".mp4", ".mkv", ".webm", ".mov", ".m4v"]
+        and ".part" not in file_path.name.lower()
+        and file_path.stat().st_size > 1_000_000
     ]
-    if not cached_files:
-        return
-
-    logger.info(
-        "Refreshing download for %s (found %s cached file(s))",
-        video_id,
-        len(cached_files),
+    if not candidates:
+        return None
+    # Prefer mp4, then newest.
+    candidates.sort(
+        key=lambda path: (
+            0 if path.suffix.lower() == ".mp4" else 1,
+            -path.stat().st_mtime,
+        )
     )
-    for cached_file in cached_files:
+    for candidate in candidates:
+        width, height = _get_local_video_dimensions(candidate)
+        if width > 0 and height > 0:
+            return candidate
+    return None
+
+
+def _remove_partial_downloads(temp_dir: Path, video_id: str) -> None:
+    """Remove incomplete yt-dlp fragments only — never wipe a complete shared file."""
+    partials = [
+        file_path
+        for file_path in temp_dir.glob(f"{video_id}*")
+        if file_path.is_file()
+        and (
+            ".part" in file_path.name.lower()
+            or file_path.suffix.lower() in {".ytdl", ".temp"}
+        )
+    ]
+    for partial in partials:
         try:
-            cached_file.unlink()
-        except Exception as exc:
-            logger.warning("Failed to remove stale cache file %s: %s", cached_file, exc)
+            partial.unlink()
+            logger.info("Removed partial download: %s", partial.name)
+        except OSError as exc:
+            logger.warning("Failed to remove partial %s: %s", partial.name, exc)
+
+
+def _remove_cached_downloads(temp_dir: Path, video_id: str) -> None:
+    """Backward-compatible name: only clears partials so concurrent tasks stay safe."""
+    _remove_partial_downloads(temp_dir, video_id)
 
 
 def sanitize_youtube_url(url: str) -> str:
@@ -1176,6 +1204,7 @@ def download_youtube_video(
     Download YouTube video using the configured provider.
     Defaults to free yt-dlp downloads and optionally falls back to Apify when configured.
     """
+    url = sanitize_youtube_url(url)
     logger.info("Starting YouTube download: %s", url)
 
     video_id = get_youtube_video_id(url)
@@ -1190,7 +1219,26 @@ def download_youtube_video(
         return download_video_via_oxylabs(video_id)
 
     downloader = YouTubeDownloader()
-    _remove_cached_downloads(downloader.temp_dir, video_id)
+    cached = _find_complete_cached_download(downloader.temp_dir, video_id)
+    if cached:
+        # #region agent log
+        _agent_debug_log(
+            "H",
+            "youtube_utils.py:download_youtube_video",
+            "reuse complete cached download",
+            {
+                "videoId": video_id,
+                "path": cached.name,
+                "sizeMb": cached.stat().st_size // 1024 // 1024,
+                "taskId": task_id,
+            },
+        )
+        # #endregion
+        logger.info("Reusing cached YouTube download for %s (%s)", video_id, cached.name)
+        return cached
+
+    # Never delete a complete shared mp4: concurrent tasks render from the same path.
+    _remove_partial_downloads(downloader.temp_dir, video_id)
 
     config = get_config()
     primary_provider = config.youtube_download_provider
@@ -1279,7 +1327,11 @@ def is_video_suitable_for_processing(
 
 
 def cleanup_downloaded_files(video_id: str, source_path: Optional[Path] = None):
-    """Remove downloaded media while retaining word timings for cached jobs."""
+    """Remove partials/audio sidecars; keep complete shared media for concurrent tasks.
+
+    Multiple workers can process the same YouTube id at once and all point at
+    ``{video_id}.mp4``. Deleting that file mid-render drops the other task's clips.
+    """
     temp_dir = Path(get_config().temp_dir)
     provider_dir = False
     if source_path is not None and source_path.parent.name.startswith((f"oxy-{video_id}-", f"videoscale-{video_id}-")):
@@ -1290,8 +1342,28 @@ def cleanup_downloaded_files(video_id: str, source_path: Optional[Path] = None):
         temp_dir = candidate
         provider_dir = True
 
+    keep_suffixes = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".json"}
     for file_path in temp_dir.glob(f"{video_id}.*"):
         if file_path.name == f"{video_id}.transcript_cache.json":
+            continue
+        name_lower = file_path.name.lower()
+        is_partial = ".part" in name_lower or file_path.suffix.lower() in {".ytdl", ".temp", ".mp3"}
+        is_complete_media = (
+            file_path.suffix.lower() in keep_suffixes and ".part" not in name_lower
+        )
+        if is_complete_media and not is_partial:
+            # #region agent log
+            _agent_debug_log(
+                "H",
+                "youtube_utils.py:cleanup_downloaded_files",
+                "skip deleting shared complete media",
+                {"videoId": video_id, "path": file_path.name},
+            )
+            # #endregion
+            logger.info(
+                "Keeping shared YouTube media for concurrent tasks: %s",
+                file_path.name,
+            )
             continue
         try:
             if file_path.is_file():
