@@ -50,7 +50,7 @@ async def _preflight_youtube_source(url: str, duration_limit: int) -> Dict[str, 
     """Check duration before creating a task or consuming a generation."""
     try:
         # Allow proxy fallbacks when the host IP is bot-blocked by YouTube.
-        metadata = await asyncio.wait_for(async_get_youtube_video_info(url), timeout=45)
+        metadata = await asyncio.wait_for(async_get_youtube_video_info(url), timeout=90)
         duration = (metadata or {}).get("duration")
         if isinstance(duration, bool) or not isinstance(duration, (int, float)):
             raise ValueError("Missing video duration")

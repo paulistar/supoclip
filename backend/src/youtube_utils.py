@@ -410,7 +410,9 @@ def _fetch_video_info_with_ytdlp(url: str) -> Dict[str, Any]:
 
     last_error: Optional[Exception] = None
     # Cap public-proxy attempts so preflight stays within the API timeout budget.
-    proxy_candidates = _iter_ytdlp_proxies(include_direct=True)[:5]
+    # Prefer proxy first on bot-blocked datacenter IPs so preflight
+    # does not burn the API timeout on a doomed direct attempt + dead proxies.
+    proxy_candidates = _iter_ytdlp_proxies(include_direct=True, prefer_proxy=True)[:8]
     for proxy in proxy_candidates:
         ydl_opts = _build_info_options(proxy=proxy)
         if proxy is not None:
