@@ -213,6 +213,17 @@ def _cleanup_stale_runtime_cookies(runtime_dir: Path, max_age_seconds: int = 360
 _PROXY_CACHE_PATH = Path(
     os.environ.get("YTDLP_PROXY_CACHE_FILE", "/app/cookies/.ytdlp_proxy")
 )
+_PROXY_CACHE_TTL_SECONDS = int(
+    os.environ.get("YTDLP_PROXY_CACHE_TTL_SECONDS", str(6 * 60 * 60))
+)
+_DURATION_CACHE_PATH = Path(
+    os.environ.get(
+        "YOUTUBE_DURATION_CACHE_FILE", "/app/cookies/.yt_duration_cache.json"
+    )
+)
+_DURATION_CACHE_TTL_SECONDS = int(
+    os.environ.get("YOUTUBE_DURATION_CACHE_TTL_SECONDS", str(24 * 60 * 60))
+)
 _PROXY_LIST_URL = (
     "https://api.proxyscrape.com/v2/"
     "?request=displayproxies&protocol=http&timeout=5000"
@@ -236,7 +247,7 @@ def _read_cached_proxy() -> Optional[str]:
         if not _PROXY_CACHE_PATH.is_file():
             return None
         age = time.time() - _PROXY_CACHE_PATH.stat().st_mtime
-        if age > 30 * 60:
+        if age > _PROXY_CACHE_TTL_SECONDS:
             return None
         value = _PROXY_CACHE_PATH.read_text(encoding="utf-8").strip()
         return value or None
@@ -250,6 +261,80 @@ def _write_cached_proxy(proxy: str) -> None:
         _PROXY_CACHE_PATH.write_text(proxy.strip() + "\n", encoding="utf-8")
     except OSError as exc:
         logger.warning("Could not cache yt-dlp proxy: %s", exc)
+
+
+def _read_cached_video_info(video_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        if not _DURATION_CACHE_PATH.is_file():
+            return None
+        payload = json.loads(_DURATION_CACHE_PATH.read_text(encoding="utf-8"))
+        entry = (payload or {}).get(video_id)
+        if not isinstance(entry, dict):
+            return None
+        saved_at = float(entry.get("saved_at") or 0)
+        if saved_at <= 0 or (time.time() - saved_at) > _DURATION_CACHE_TTL_SECONDS:
+            return None
+        info = entry.get("info")
+        if not isinstance(info, dict):
+            return None
+        duration = info.get("duration")
+        if not isinstance(duration, (int, float)) or duration <= 0:
+            return None
+        return info
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _write_cached_video_info(video_id: str, info: Dict[str, Any]) -> None:
+    duration = (info or {}).get("duration")
+    if not video_id or not isinstance(duration, (int, float)) or duration <= 0:
+        return
+    try:
+        _DURATION_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload: Dict[str, Any] = {}
+        if _DURATION_CACHE_PATH.is_file():
+            try:
+                loaded = json.loads(_DURATION_CACHE_PATH.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    payload = loaded
+            except (OSError, json.JSONDecodeError, TypeError):
+                payload = {}
+        # Keep cache small: drop expired entries and cap size.
+        now = time.time()
+        pruned: Dict[str, Any] = {}
+        for key, entry in payload.items():
+            if not isinstance(entry, dict):
+                continue
+            saved_at = float(entry.get("saved_at") or 0)
+            if saved_at and (now - saved_at) <= _DURATION_CACHE_TTL_SECONDS:
+                pruned[key] = entry
+        pruned[video_id] = {
+            "saved_at": now,
+            "info": {
+                "id": info.get("id") or video_id,
+                "title": info.get("title"),
+                "description": info.get("description", ""),
+                "duration": int(duration),
+                "uploader": info.get("uploader"),
+                "upload_date": info.get("upload_date"),
+                "view_count": info.get("view_count"),
+                "like_count": info.get("like_count"),
+                "thumbnail": info.get("thumbnail"),
+            },
+        }
+        if len(pruned) > 200:
+            # Keep newest 200 by saved_at.
+            ordered = sorted(
+                pruned.items(),
+                key=lambda item: float((item[1] or {}).get("saved_at") or 0),
+                reverse=True,
+            )[:200]
+            pruned = dict(ordered)
+        _DURATION_CACHE_PATH.write_text(
+            json.dumps(pruned, ensure_ascii=True), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning("Could not cache YouTube duration for %s: %s", video_id, exc)
 
 
 def _proxy_tcp_alive(proxy: str, timeout: float = 3.0) -> bool:
@@ -779,6 +864,23 @@ def get_youtube_video_info(
         # #endregion
         return None
 
+    cached = _read_cached_video_info(video_id)
+    if cached:
+        # #region agent log
+        _agent_debug_log(
+            "G",
+            "youtube_utils.py:get_youtube_video_info",
+            "metadata cache hit",
+            {
+                "videoId": video_id,
+                "duration": cached.get("duration"),
+                "urlSanitized": raw_url != url,
+            },
+        )
+        # #endregion
+        logger.info("Fetched YouTube metadata for %s using duration cache", video_id)
+        return cached
+
     config = get_config()
     providers = _metadata_provider_chain(config)
     has_key = bool(config.resolve_youtube_data_api_key())
@@ -817,6 +919,7 @@ def get_youtube_video_info(
                     video_id,
                     provider,
                 )
+            _write_cached_video_info(video_id, video_info)
             # #region agent log
             _agent_debug_log(
                 "C",
