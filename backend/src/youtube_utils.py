@@ -105,7 +105,119 @@ def _apply_cookies(ydl_opts: Dict[str, Any]) -> Dict[str, Any]:
     return ydl_opts
 
 
-def _build_info_options() -> Dict[str, Any]:
+_PROXY_CACHE_PATH = Path(
+    os.environ.get("YTDLP_PROXY_CACHE_FILE", "/app/cookies/.ytdlp_proxy")
+)
+_PROXY_LIST_URL = (
+    "https://api.proxyscrape.com/v2/"
+    "?request=displayproxies&protocol=http&timeout=5000"
+    "&country=all&ssl=all&anonymity=all"
+)
+
+
+def _apply_proxy(
+    ydl_opts: Dict[str, Any],
+    proxy: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Attach an explicit proxy, or YTDLP_PROXY when set."""
+    resolved = (proxy or os.environ.get("YTDLP_PROXY") or "").strip()
+    if resolved:
+        ydl_opts["proxy"] = resolved
+    return ydl_opts
+
+
+def _read_cached_proxy() -> Optional[str]:
+    try:
+        if not _PROXY_CACHE_PATH.is_file():
+            return None
+        age = time.time() - _PROXY_CACHE_PATH.stat().st_mtime
+        if age > 30 * 60:
+            return None
+        value = _PROXY_CACHE_PATH.read_text(encoding="utf-8").strip()
+        return value or None
+    except OSError:
+        return None
+
+
+def _write_cached_proxy(proxy: str) -> None:
+    try:
+        _PROXY_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PROXY_CACHE_PATH.write_text(proxy.strip() + "\n", encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not cache yt-dlp proxy: %s", exc)
+
+
+def _fetch_public_http_proxies(limit: int = 20) -> list[str]:
+    """Best-effort free HTTP proxies for datacenter IP bot-checks."""
+    try:
+        response = requests.get(_PROXY_LIST_URL, timeout=(5, 15))
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        logger.warning("Proxy list fetch failed: %s", exc)
+        return []
+
+    proxies: list[str] = []
+    for line in response.text.splitlines():
+        host = line.strip()
+        if not host or ":" not in host:
+            continue
+        proxies.append(host if host.startswith("http") else f"http://{host}")
+        if len(proxies) >= limit:
+            break
+    return proxies
+
+
+def _iter_ytdlp_proxies(
+    include_direct: bool = True,
+    prefer_proxy: bool = False,
+) -> list[Optional[str]]:
+    """
+    Candidate proxies for yt-dlp.
+
+    Default order: direct → YTDLP_PROXY → cached → public list.
+    When prefer_proxy=True (downloads on bot-blocked hosts): cached →
+    YTDLP_PROXY → public → direct last.
+    """
+    ordered: list[Optional[str]] = []
+    seen: set[str] = set()
+
+    def _add(proxy: Optional[str]) -> None:
+        if proxy is None:
+            if include_direct and None not in ordered:
+                ordered.append(None)
+            return
+        normalized = proxy.strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        ordered.append(normalized)
+
+    if not prefer_proxy and include_direct:
+        _add(None)
+    _add(_read_cached_proxy() if prefer_proxy else os.environ.get("YTDLP_PROXY"))
+    _add(os.environ.get("YTDLP_PROXY") if prefer_proxy else _read_cached_proxy())
+    if os.environ.get("YTDLP_AUTO_PROXY", "true").lower() in {"1", "true", "yes"}:
+        for proxy in _fetch_public_http_proxies(limit=30):
+            _add(proxy)
+    if prefer_proxy and include_direct:
+        _add(None)
+    return ordered
+
+
+def _is_youtube_bot_block_error(error: BaseException) -> bool:
+    text = str(error).lower()
+    return any(
+        needle in text
+        for needle in (
+            "sign in to confirm",
+            "not a bot",
+            "confirm you're not a bot",
+            "confirm you’re not a bot",
+        )
+    )
+
+
+def _build_info_options(proxy: Optional[str] = None) -> Dict[str, Any]:
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -120,7 +232,7 @@ def _build_info_options() -> Dict[str, Any]:
         },
         "nocheckcertificate": True,
     }
-    return _apply_cookies(ydl_opts)
+    return _apply_proxy(_apply_cookies(ydl_opts), proxy=proxy)
 
 
 def _empty_video_info(video_id: Optional[str] = None) -> Dict[str, Any]:
@@ -296,25 +408,50 @@ def _fetch_video_info_with_ytdlp(url: str) -> Dict[str, Any]:
     if not video_id:
         raise ValueError(f"Invalid YouTube URL: {url}")
 
-    ydl_opts = _build_info_options()
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    last_error: Optional[Exception] = None
+    # Cap public-proxy attempts so preflight stays within the API timeout budget.
+    proxy_candidates = _iter_ytdlp_proxies(include_direct=True)[:5]
+    for proxy in proxy_candidates:
+        ydl_opts = _build_info_options(proxy=proxy)
+        if proxy is not None:
+            ydl_opts["socket_timeout"] = 15
+            ydl_opts["retries"] = 0
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if proxy:
+                _write_cached_proxy(proxy)
+                logger.info("YouTube metadata via proxy succeeded for %s", video_id)
+            return {
+                "id": info.get("id"),
+                "title": info.get("title"),
+                "description": info.get("description", ""),
+                "duration": info.get("duration"),
+                "uploader": info.get("uploader"),
+                "upload_date": info.get("upload_date"),
+                "view_count": info.get("view_count"),
+                "like_count": info.get("like_count"),
+                "thumbnail": info.get("thumbnail"),
+                "format_id": info.get("format_id"),
+                "resolution": info.get("resolution"),
+                "fps": info.get("fps"),
+                "filesize": info.get("filesize"),
+            }
+        except Exception as exc:
+            last_error = exc
+            if proxy is None and not _is_youtube_bot_block_error(exc):
+                raise
+            logger.warning(
+                "yt-dlp metadata failed for %s via %s: %s",
+                video_id,
+                proxy or "direct",
+                exc,
+            )
+            continue
 
-    return {
-        "id": info.get("id"),
-        "title": info.get("title"),
-        "description": info.get("description", ""),
-        "duration": info.get("duration"),
-        "uploader": info.get("uploader"),
-        "upload_date": info.get("upload_date"),
-        "view_count": info.get("view_count"),
-        "like_count": info.get("like_count"),
-        "thumbnail": info.get("thumbnail"),
-        "format_id": info.get("format_id"),
-        "resolution": info.get("resolution"),
-        "fps": info.get("fps"),
-        "filesize": info.get("filesize"),
-    }
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"yt-dlp metadata failed for {video_id}")
 
 
 def _fetch_video_info_with_youtube_data_api(url: str) -> Dict[str, Any]:
@@ -547,11 +684,33 @@ def _download_youtube_video_with_ytdlp(
 
     last_error: Optional[str] = None
 
-    for attempt in range(max_retries):
+    # Prefer proxies first on Contabo-like datacenter IPs; free proxies die often
+    # so keep a wider candidate list than the default max_retries.
+    proxy_candidates = _iter_ytdlp_proxies(include_direct=True, prefer_proxy=True)[:10]
+    download_attempts = max(max_retries, min(8, len(proxy_candidates)))
+    for attempt in range(download_attempts):
+        proxy = proxy_candidates[min(attempt, len(proxy_candidates) - 1)]
         try:
-            logger.info("Download attempt %s/%s", attempt + 1, max_retries)
+            logger.info(
+                "Download attempt %s/%s via %s",
+                attempt + 1,
+                download_attempts,
+                proxy or "direct",
+            )
 
-            ydl_opts = _apply_cookies(downloader.get_optimal_download_options(video_id))
+            ydl_opts = _apply_proxy(
+                _apply_cookies(downloader.get_optimal_download_options(video_id)),
+                proxy=proxy,
+            )
+            # Lower format target through flaky free proxies for faster, stabler pulls.
+            if proxy:
+                ydl_opts["format"] = (
+                    "bestvideo[height<=480]+bestaudio/"
+                    "best[height<=480]/bestvideo*+bestaudio/best"
+                )
+                ydl_opts["socket_timeout"] = 45
+                ydl_opts["retries"] = 8
+                ydl_opts["fragment_retries"] = 8
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([url])
@@ -579,6 +738,8 @@ def _download_youtube_video_with_ytdlp(
                 best_downloaded_file = ranked_files[0][3]
                 file_size = best_downloaded_file.stat().st_size
                 width, height = _get_local_video_dimensions(best_downloaded_file)
+                if proxy:
+                    _write_cached_proxy(proxy)
                 logger.info(
                     f"Download successful: {best_downloaded_file.name} ({file_size // 1024 // 1024}MB, {width}x{height})"
                 )
@@ -589,8 +750,8 @@ def _download_youtube_video_with_ytdlp(
         except yt_dlp.utils.DownloadError as e:
             last_error = str(e)
             logger.warning("Download attempt %s failed: %s", attempt + 1, e)
-            if attempt < max_retries - 1:
-                wait_time = 2**attempt
+            if attempt < download_attempts - 1:
+                wait_time = min(8, 2**attempt)
                 logger.info(f"Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             else:
@@ -603,8 +764,8 @@ def _download_youtube_video_with_ytdlp(
                 attempt + 1,
                 e,
             )
-            if attempt < max_retries - 1:
-                wait_time = 2**attempt
+            if attempt < download_attempts - 1:
+                wait_time = min(8, 2**attempt)
                 logger.info(f"Retrying in {wait_time} seconds...")
                 time.sleep(wait_time)
             else:

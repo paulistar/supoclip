@@ -49,7 +49,8 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 async def _preflight_youtube_source(url: str, duration_limit: int) -> Dict[str, Any]:
     """Check duration before creating a task or consuming a generation."""
     try:
-        metadata = await asyncio.wait_for(async_get_youtube_video_info(url), timeout=15)
+        # Allow proxy fallbacks when the host IP is bot-blocked by YouTube.
+        metadata = await asyncio.wait_for(async_get_youtube_video_info(url), timeout=45)
         duration = (metadata or {}).get("duration")
         if isinstance(duration, bool) or not isinstance(duration, (int, float)):
             raise ValueError("Missing video duration")
