@@ -179,21 +179,32 @@ YouTube tasks error early or cannot fetch source media.
 ### Common causes
 
 - Expired or invalid cookies
-- YouTube anti-bot restrictions
+- YouTube anti-bot restrictions on datacenter IPs (Contabo/EasyPanel)
+- `yt-dlp` rewriting the durable cookie jar with a logged-out session (fixed: disposable copies)
+- Dead free proxies from `YTDLP_AUTO_PROXY` burning all download attempts
 - Network restrictions
 - Apify actor failures or missing `APIFY_API_TOKEN`
 - `yt-dlp` fallback edge-case changes
 
+### Cookie dependency (still required for free download)
+
+- Metadata can avoid cookies when `YOUTUBE_METADATA_PROVIDER=youtube_data_api` and `YOUTUBE_DATA_API_KEY` / `GOOGLE_API_KEY` is set.
+- **Downloading** with `YOUTUBE_DOWNLOAD_PROVIDER=yt_dlp` still needs a fresh Netscape cookie jar at `YTDLP_COOKIES_FILE` (default `/app/cookies/youtube.txt`) **or** a paid path (`APIFY_API_TOKEN` / Oxylabs / VideoScale).
+- Export cookies from a logged-in browser on a residential IP, mount/replace the sealed jar, and avoid pointing `cookiefile` at the sealed path (the worker copies to a disposable runtime file so yt-dlp cannot poison the jar).
+
 ### Checks
 
-- Review backend and worker logs
+- Review backend and worker logs for `Sign in to confirm you’re not a bot` vs proxy timeouts
 - Confirm `APIFY_API_TOKEN` is set if you expect the primary download path to use Apify
 - Confirm `APIFY_YOUTUBE_DEFAULT_QUALITY` is one of `360`, `480`, `720`, or `1080`
+- Prefer `YOUTUBE_METADATA_PROVIDER=youtube_data_api` when a Google/YouTube Data API key exists
 
 ### Fixes
 
 - Verify the source URL is publicly reachable by either Apify or plain `yt-dlp`
 - Retry with `APIFY_API_TOKEN` configured if the direct `yt-dlp` fallback is being rate-limited
+- Replace `/app/cookies/youtube.txt` with a fresh export (chmod writable first if the jar was sealed read-only)
+- Set a stable residential `YTDLP_PROXY` and optionally `YTDLP_AUTO_PROXY=false` to stop burning dead public proxies
 
 ## Frontend Loads But Shows Errors
 

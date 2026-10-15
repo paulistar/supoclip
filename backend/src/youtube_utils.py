@@ -8,7 +8,10 @@ from datetime import datetime
 import logging
 import os
 import re
+import shutil
+import socket
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -88,21 +91,82 @@ class YouTubeDownloader:
         return opts
 
 
+def _cookie_runtime_dir(source: Path) -> Path:
+    """Directory for disposable cookie copies next to the durable jar when possible."""
+    preferred = source.parent / ".runtime"
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        probe = preferred / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        return preferred
+    except OSError:
+        return Path(tempfile.gettempdir())
+
+
 def _apply_cookies(ydl_opts: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Attach YouTube cookies without letting yt-dlp rewrite the durable jar.
+
+    yt-dlp writes refreshed cookies back to `cookiefile`. On Contabo that often
+    replaces a good browser export with a bot-throttled / logged-out session, so
+    later jobs fail until cookies are remounted. Always feed yt-dlp a disposable
+    copy; keep YTDLP_COOKIES_FILE as the sealed source of truth.
+    """
     cookie_file = os.environ.get("YTDLP_COOKIES_FILE")
     if not cookie_file:
         logger.warning(
             "YTDLP_COOKIES_FILE is unset; YouTube may block downloads with bot checks"
         )
         return ydl_opts
-    if os.path.isfile(cookie_file):
-        ydl_opts["cookiefile"] = cookie_file
-    else:
+    source = Path(cookie_file)
+    if not source.is_file():
         logger.warning(
             "YTDLP_COOKIES_FILE=%s is missing; YouTube may block downloads with bot checks",
             cookie_file,
         )
+        return ydl_opts
+
+    runtime_dir = _cookie_runtime_dir(source)
+    try:
+        _cleanup_stale_runtime_cookies(runtime_dir)
+        handle = tempfile.NamedTemporaryFile(
+            prefix="ytdlp-cookies-",
+            suffix=".txt",
+            dir=str(runtime_dir),
+            delete=False,
+        )
+        handle.close()
+        runtime_path = Path(handle.name)
+        shutil.copy2(source, runtime_path)
+        # Best-effort: discourage accidental in-place edits of the durable jar
+        # if some other path still points at it.
+        try:
+            source.chmod(0o444)
+        except OSError:
+            pass
+        ydl_opts["cookiefile"] = str(runtime_path)
+    except OSError as exc:
+        logger.warning(
+            "Could not create disposable cookie jar from %s (%s); using source file",
+            cookie_file,
+            exc,
+        )
+        ydl_opts["cookiefile"] = cookie_file
     return ydl_opts
+
+
+def _cleanup_stale_runtime_cookies(runtime_dir: Path, max_age_seconds: int = 3600) -> None:
+    try:
+        now = time.time()
+        for path in runtime_dir.glob("ytdlp-cookies-*.txt"):
+            try:
+                if now - path.stat().st_mtime > max_age_seconds:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        pass
 
 
 _PROXY_CACHE_PATH = Path(
@@ -145,6 +209,20 @@ def _write_cached_proxy(proxy: str) -> None:
         _PROXY_CACHE_PATH.write_text(proxy.strip() + "\n", encoding="utf-8")
     except OSError as exc:
         logger.warning("Could not cache yt-dlp proxy: %s", exc)
+
+
+def _proxy_tcp_alive(proxy: str, timeout: float = 3.0) -> bool:
+    """Cheap TCP connect check so we skip dead public proxies before yt-dlp."""
+    try:
+        parsed = urlparse(proxy if "://" in proxy else f"http://{proxy}")
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if not host or not port:
+            return False
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _fetch_public_http_proxies(limit: int = 20) -> list[str]:
@@ -198,7 +276,11 @@ def _iter_ytdlp_proxies(
     _add(os.environ.get("YTDLP_PROXY") if prefer_proxy else _read_cached_proxy())
     if os.environ.get("YTDLP_AUTO_PROXY", "true").lower() in {"1", "true", "yes"}:
         for proxy in _fetch_public_http_proxies(limit=30):
-            _add(proxy)
+            # Skip obvious corpses before burning yt-dlp retries on them.
+            if _proxy_tcp_alive(proxy):
+                _add(proxy)
+            else:
+                logger.debug("Skipping dead public proxy candidate %s", proxy)
     if prefer_proxy and include_direct:
         _add(None)
     return ordered
@@ -354,6 +436,19 @@ def _remove_cached_downloads(temp_dir: Path, video_id: str) -> None:
             logger.warning("Failed to remove stale cache file %s: %s", cached_file, exc)
 
 
+def sanitize_youtube_url(url: str) -> str:
+    """
+    Keep only the YouTube URL when users paste a brief after ` // `.
+    Example: `https://youtu.be/ID?t=600 // hook first` → URL only.
+    """
+    if not isinstance(url, str):
+        return ""
+    cleaned = url.strip()
+    if "://" in cleaned and " // " in cleaned:
+        cleaned = cleaned.split(" // ", 1)[0].strip()
+    return cleaned
+
+
 def get_youtube_video_id(url: str) -> Optional[str]:
     """
     Extract YouTube video ID from various URL formats.
@@ -362,7 +457,7 @@ def get_youtube_video_id(url: str) -> Optional[str]:
     if not isinstance(url, str) or not url.strip():
         return None
 
-    url = url.strip()
+    url = sanitize_youtube_url(url)
 
     # Comprehensive regex patterns for different YouTube URL formats
     patterns = [
@@ -404,6 +499,7 @@ def validate_youtube_url(url: str) -> bool:
 
 
 def _fetch_video_info_with_ytdlp(url: str) -> Dict[str, Any]:
+    url = sanitize_youtube_url(url)
     video_id = get_youtube_video_id(url)
     if not video_id:
         raise ValueError(f"Invalid YouTube URL: {url}")
@@ -662,6 +758,7 @@ def _download_youtube_video_with_ytdlp(
     Download YouTube video with optimized settings and retry logic.
     Returns the path to the downloaded file, or None if download fails.
     """
+    url = sanitize_youtube_url(url)
     logger.info(f"Starting YouTube download: {url}")
 
     video_id = get_youtube_video_id(url)
@@ -705,10 +802,13 @@ def _download_youtube_video_with_ytdlp(
                 proxy=proxy,
             )
             # Lower format target through flaky free proxies for faster, stabler pulls.
+            # Keep a broad fallback: some proxies only expose progressive or HLS forms.
             if proxy:
                 ydl_opts["format"] = (
-                    "bestvideo[height<=480]+bestaudio/"
-                    "best[height<=480]/bestvideo*+bestaudio/best"
+                    "bestvideo[height<=720]+bestaudio/"
+                    "best[height<=720]/"
+                    "bestvideo*[height<=720]+bestaudio/"
+                    "bv*+ba/b"
                 )
                 ydl_opts["socket_timeout"] = 45
                 ydl_opts["retries"] = 8

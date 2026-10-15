@@ -508,6 +508,44 @@ def test_cleanup_keeps_word_timings_for_cached_reprocessing(monkeypatch, tmp_pat
     assert [p.name for p in tmp_path.iterdir()] == ["abcdefghijk.transcript_cache.json"]
 
 
+def test_apply_cookies_uses_disposable_copy_not_durable_jar(tmp_path, monkeypatch):
+    from src.youtube_utils import _apply_cookies
+
+    durable = tmp_path / "youtube.txt"
+    durable.write_text("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tFALSE\t0\tSID\tdummy\n")
+    original = durable.read_text()
+    monkeypatch.setenv("YTDLP_COOKIES_FILE", str(durable))
+
+    opts = _apply_cookies({})
+    cookiefile = Path(opts["cookiefile"])
+
+    assert cookiefile != durable
+    assert cookiefile.is_file()
+    assert cookiefile.read_text() == original
+    # Simulate yt-dlp rewriting the cookiefile it was given.
+    cookiefile.write_text("# rewritten by yt-dlp\n")
+    assert durable.read_text() == original
+
+
+def test_proxy_tcp_alive_rejects_bad_host(monkeypatch):
+    from src.youtube_utils import _proxy_tcp_alive
+
+    assert _proxy_tcp_alive("http://127.0.0.1:1", timeout=0.2) is False
+
+
+def test_sanitize_youtube_url_strips_pasted_brief():
+    from src.youtube_utils import get_youtube_video_id, sanitize_youtube_url
+
+    raw = (
+        "https://youtu.be/K-lAXaexVrA?si=95K16d5BaJAvf7jT&t=600 "
+        "// os videos vao ser postados nas redes sociais"
+    )
+    assert sanitize_youtube_url(raw) == (
+        "https://youtu.be/K-lAXaexVrA?si=95K16d5BaJAvf7jT&t=600"
+    )
+    assert get_youtube_video_id(raw) == "K-lAXaexVrA"
+
+
 @pytest.mark.parametrize(
     ("duration", "expected_quality"),
     [(1200, "1440"), (5196, "1080"), (None, "1440")],
