@@ -4,10 +4,9 @@ import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowRight, Link2Off, Sparkles } from "lucide-react";
+import { Link2Off } from "lucide-react";
 
 import { ClipFocus, ClipTile, type WallClip } from "@/components/app/clip-wall";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
 import { formatClipDuration } from "@/lib/generations";
@@ -80,13 +79,10 @@ export default function SharedGenerationPage() {
 
   const header = (
     <header className="sticky top-0 z-30 border-b bg-background/80 backdrop-blur">
-      <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-8">
+      <div className="mx-auto flex h-14 max-w-7xl items-center px-4 sm:px-8">
         <Link href="/" className="flex items-center gap-2 font-display text-lg font-bold tracking-tight">
           <Image src="/logo.png" alt="MartClip" width={100} height={28} className="h-6 w-auto" priority /><span>MartClip</span>
         </Link>
-        <Button asChild size="sm" className="rounded-full">
-          <Link href="/"><Sparkles className="size-4" />Make your own</Link>
-        </Button>
       </div>
     </header>
   );
@@ -113,7 +109,6 @@ export default function SharedGenerationPage() {
           <span className="flex size-14 items-center justify-center rounded-2xl bg-muted text-muted-foreground"><Link2Off className="size-7" /></span>
           <h1 className="mt-4 font-display text-2xl font-bold tracking-tight">This link isn&apos;t available</h1>
           <p role="alert" className="mt-2 max-w-md text-sm text-muted-foreground">{error || "This share link is unavailable"}</p>
-          <Button asChild className="mt-6"><Link href="/">Create your own clips</Link></Button>
         </div>
       </main>
     );
@@ -161,19 +156,6 @@ export default function SharedGenerationPage() {
             />
           ))}
         </div>
-
-        <section className="relative mt-16 overflow-hidden rounded-3xl bg-stone-950 px-6 py-10 text-white sm:px-10">
-          <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_15%_0%,oklch(0.45_0.12_40/0.55),transparent_60%)]" />
-          <div className="relative flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h2 className="font-display text-2xl font-bold tracking-tight">Turn your long videos into clips like these.</h2>
-              <p className="mt-2 max-w-lg text-sm text-white/65">MartClip finds the best moments, frames the speaker and writes the captions. Open source and free to self-host.</p>
-            </div>
-            <Button asChild size="lg" className="shrink-0 rounded-full bg-white text-stone-950 hover:bg-white/90">
-              <Link href="/">Try MartClip<ArrowRight className="size-4" /></Link>
-            </Button>
-          </div>
-        </section>
       </div>
 
       <ClipFocus
