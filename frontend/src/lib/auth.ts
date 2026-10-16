@@ -6,8 +6,9 @@ import { getAuthTrustedOrigins } from "@/lib/auth-origins";
 import { prepareAccountDeletion } from "@/server/account-deletion";
 import { fetchBackend } from "@/server/backend-api";
 
-const disableSignUp = ["1", "true", "yes"].includes(
-  (process.env.DISABLE_SIGN_UP ?? "").toLowerCase()
+// Default closed for MartClip self-host; set DISABLE_SIGN_UP=false to reopen.
+const disableSignUp = !["0", "false", "no"].includes(
+  (process.env.DISABLE_SIGN_UP ?? "true").toLowerCase()
 );
 
 async function sendPasswordResetEmail(userId: string, url: string) {

@@ -6,6 +6,15 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: false,
   },
+  async redirects() {
+    return [
+      {
+        source: "/sign-up",
+        destination: "/sign-in",
+        permanent: false,
+      },
+    ];
+  },
   async rewrites() {
     return [
       {
