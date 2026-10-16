@@ -22,32 +22,32 @@ export const blogPosts: BlogPost[] = [
   {
     slug: "supoclip-vs-supo-live",
     image: { src: "/blog/supoclip-open-source-clipping.webp", alt: "Editorial illustration of a podcast recording becoming three vertical video clips", width: 1672, height: 941 },
-    title: "SupoClip vs supo.live: Why Open Source Wins",
+    title: "MartClip vs supo.live: Why Open Source Wins",
     description:
-      "Compare SupoClip and supo.live for AI video clipping. See why SupoClip wins for open-source control, self-hosting, and customizable video workflows.",
+      "Compare MartClip and supo.live for AI video clipping. See why MartClip wins for open-source control, self-hosting, and customizable video workflows.",
     eyebrow: "Supo.live Alternative",
     category: "Comparison",
     publishedAt: "2026-09-21",
     updatedAt: "2026-10-05",
     readingTime: "5 min read",
-    author: "SupoClip",
-    keywords: ["SupoClip vs supo.live", "supo.live alternative", "open-source video clipper", "self-hosted AI video clipping", "AI clip maker"],
+    author: "MartClip",
+    keywords: ["MartClip vs supo.live", "supo.live alternative", "open-source video clipper", "self-hosted AI video clipping", "AI clip maker"],
     summary:
-      "For creators and teams who want control over their clipping workflow, SupoClip is the better open-source alternative to supo.live.",
+      "For creators and teams who want control over their clipping workflow, MartClip is the better open-source alternative to supo.live.",
   },
   {
     slug: "supoclip-vs-opusclip",
-    title: "SupoClip vs OpusClip: A Sourced Comparison",
+    title: "MartClip vs OpusClip: A Sourced Comparison",
     description:
-      "SupoClip vs OpusClip compared on deployment, pricing model, watermarks, model choice, and workflow, with a source linked for every claim.",
+      "MartClip vs OpusClip compared on deployment, pricing model, watermarks, model choice, and workflow, with a source linked for every claim.",
     eyebrow: "OpusClip Comparison",
     category: "Comparison",
     publishedAt: "2026-10-05",
     updatedAt: "2026-10-05",
     readingTime: "7 min read",
-    author: "SupoClip",
+    author: "MartClip",
     keywords: [
-      "SupoClip vs OpusClip",
+      "MartClip vs OpusClip",
       "OpusClip alternative",
       "OpusClip vs open source",
       "self-hosted OpusClip alternative",
@@ -58,17 +58,17 @@ export const blogPosts: BlogPost[] = [
   },
   {
     slug: "self-host-supoclip-docker",
-    title: "How to Self-Host SupoClip with Docker Compose",
+    title: "How to Self-Host MartClip with Docker Compose",
     description:
-      "Self-host SupoClip, the open-source AI video clipper: requirements, .env setup, a fully local Whisper + Ollama option, first-run checks, and a production checklist.",
+      "Self-host MartClip, the open-source AI video clipper: requirements, .env setup, a fully local Whisper + Ollama option, first-run checks, and a production checklist.",
     eyebrow: "Self-Hosting Guide",
     category: "Guide",
     publishedAt: "2026-10-05",
     updatedAt: "2026-10-05",
     readingTime: "9 min read",
-    author: "SupoClip",
+    author: "MartClip",
     keywords: [
-      "self-host SupoClip",
+      "self-host MartClip",
       "self-hosted AI video clipper",
       "open-source video clipper Docker",
       "self-hosted OpusClip alternative",
@@ -81,13 +81,13 @@ export const blogPosts: BlogPost[] = [
     slug: "best-free-opusclip-alternative",
     title: "Best Free, Self-Hosted OpusClip Alternative",
     description:
-      "Looking for a free OpusClip alternative? SupoClip is an open-source AI clip maker you can self-host for free. It turns long videos into captioned, vertical shorts.",
+      "Looking for a free OpusClip alternative? MartClip is an open-source AI clip maker you can self-host for free. It turns long videos into captioned, vertical shorts.",
     eyebrow: "OpusClip Alternative",
     category: "Comparison",
     publishedAt: "2026-05-07",
     updatedAt: "2026-10-05",
     readingTime: "6 min read",
-    author: "SupoClip",
+    author: "MartClip",
     keywords: [
       "free OpusClip alternative",
       "OpusClip alternative",
@@ -97,7 +97,7 @@ export const blogPosts: BlogPost[] = [
       "YouTube shorts clipper",
     ],
     summary:
-      "SupoClip is built for creators who want OpusClip-style AI clipping on their own infrastructure, without another credit-based subscription.",
+      "MartClip is built for creators who want OpusClip-style AI clipping on their own infrastructure, without another credit-based subscription.",
   },
 ];
 
@@ -110,7 +110,7 @@ export function getBlogPostMetadata(post: BlogPost): Metadata {
   const url = `${siteUrl}/blog/${post.slug}`;
 
   return {
-    title: { absolute: `${post.title} | SupoClip` },
+    title: { absolute: `${post.title} | MartClip` },
     description: post.description,
     keywords: post.keywords,
     alternates: {
@@ -121,7 +121,7 @@ export function getBlogPostMetadata(post: BlogPost): Metadata {
       description: post.description,
       type: "article",
       url,
-      siteName: "SupoClip",
+      siteName: "MartClip",
       publishedTime: post.publishedAt,
       modifiedTime: post.updatedAt,
       authors: [post.author],

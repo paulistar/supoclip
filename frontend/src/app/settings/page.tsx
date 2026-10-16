@@ -487,7 +487,7 @@ export default function SettingsPage() {
           <span className="flex size-9 items-center justify-center rounded-lg bg-muted"><Megaphone className="size-4" /></span>
           <span className="min-w-0 flex-1">
             <span className="block text-sm font-semibold">Creator program</span>
-            <span className="block text-xs text-muted-foreground">Make videos about SupoClip, get Pro free and a code for your audience</span>
+            <span className="block text-xs text-muted-foreground">Make videos about MartClip, get Pro free and a code for your audience</span>
           </span>
           <ChevronRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
         </Link>

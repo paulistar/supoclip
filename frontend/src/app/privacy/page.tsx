@@ -9,18 +9,18 @@ const LAST_UPDATED = "October 5, 2026";
 const CONTACT_EMAIL = "privacy@supoclip.com";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy | SupoClip",
+  title: "Privacy Policy | MartClip",
   description:
-    "How SupoClip collects, uses, shares, and protects your data when you use the SupoClip video-clipping service.",
+    "How MartClip collects, uses, shares, and protects your data when you use the MartClip video-clipping service.",
   alternates: {
     canonical: `${getSiteUrl()}/privacy`,
   },
   openGraph: {
-    title: "SupoClip Privacy Policy",
-    description: "How SupoClip handles your data.",
+    title: "MartClip Privacy Policy",
+    description: "How MartClip handles your data.",
     type: "website",
     url: `${getSiteUrl()}/privacy`,
-    siteName: "SupoClip",
+    siteName: "MartClip",
   },
 };
 
@@ -44,12 +44,12 @@ export default function PrivacyPolicyPage() {
       <header className="border-b bg-background/95">
         <div className="mx-auto flex h-16 max-w-3xl items-center justify-between px-6">
           <Link href="/" className="flex items-center gap-2.5">
-            <Image src="/logo.png" alt="SupoClip" width={24} height={24} className="rounded-lg" />
+            <Image src="/logo.png" alt="MartClip" width={100} height={28} className="h-6 w-auto" />
             <span
               className="text-lg font-bold tracking-tight"
               style={{ fontFamily: "var(--font-syne), var(--font-geist-sans), system-ui" }}
             >
-              SupoClip
+              MartClip
             </span>
           </Link>
           <a href={HOSTED_APP_URL} target="_blank" rel="noopener noreferrer">
@@ -75,16 +75,16 @@ export default function PrivacyPolicyPage() {
         <div className="mt-12 space-y-10">
           <Section title="Overview">
             <p>
-              This Privacy Policy explains how SupoClip (&ldquo;SupoClip,&rdquo; &ldquo;we,&rdquo;
+              This Privacy Policy explains how MartClip (&ldquo;MartClip,&rdquo; &ldquo;we,&rdquo;
               &ldquo;us&rdquo;) collects, uses, shares, and protects information when you use the
-              SupoClip apps and hosted service (the &ldquo;Service&rdquo;), which turn long-form
+              MartClip apps and hosted service (the &ldquo;Service&rdquo;), which turn long-form
               videos into short, captioned clips.
             </p>
             <p>
-              SupoClip is also available as open-source software you can self-host. If you use a
+              MartClip is also available as open-source software you can self-host. If you use a
               self-hosted instance operated by you or a third party, that operator&mdash;not
-              SupoClip&mdash;is responsible for the data processed by that instance. This policy
-              describes the SupoClip-operated hosted service.
+              MartClip&mdash;is responsible for the data processed by that instance. This policy
+              describes the MartClip-operated hosted service.
             </p>
           </Section>
 
@@ -129,7 +129,7 @@ export default function PrivacyPolicyPage() {
               The first account to sign in on that browser claims the record, and it is then deleted
               from the browser so no other account can use it. If that account is new, we save the
               record to it once, shortly after sign-up. We also note when you first download or export a clip. We use this to learn
-              which channels bring people who find SupoClip useful. If analytics are enabled, the
+              which channels bring people who find MartClip useful. If analytics are enabled, the
               sign-up and clip-export events we send to our analytics provider include the same
               campaign fields. We don&apos;t use this information for advertising or sell it. You can
               remove the record from your browser by clearing site data for supoclip.com.
@@ -236,7 +236,7 @@ export default function PrivacyPolicyPage() {
 
         <div className="mt-14 border-t pt-8 text-sm text-muted-foreground">
           <Link href="/" className="underline hover:text-foreground">
-            Back to SupoClip
+            Back to MartClip
           </Link>
         </div>
       </article>

@@ -7,7 +7,7 @@ const siteUrl = getSiteUrl();
 
 export const metadata: Metadata = {
   title: {
-    absolute: "SupoClip – Open-Source AI Video Clipper for Shorts",
+    absolute: "MartClip – Open-Source AI Video Clipper for Shorts",
   },
   description:
     "Turn long videos into captioned YouTube Shorts, TikToks, and Reels with open-source AI clipping, virality scoring, and face-aware 9:16 crops.",
@@ -22,16 +22,16 @@ export const metadata: Metadata = {
     "AI clip maker",
   ],
   openGraph: {
-    title: "SupoClip – Open-Source AI Video Clipper for Shorts",
+    title: "MartClip – Open-Source AI Video Clipper for Shorts",
     description:
       "Turn long videos into captioned YouTube Shorts, TikToks, and Reels with open-source AI clipping.",
     url: siteUrl,
-    siteName: "SupoClip",
+    siteName: "MartClip",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "SupoClip – Open-Source AI Video Clipper for Shorts",
+    title: "MartClip – Open-Source AI Video Clipper for Shorts",
     description:
       "Open-source AI clipping, virality scoring, captions, and face-aware vertical crops.",
   },
@@ -41,7 +41,7 @@ const structuredData = [
   {
     "@context": "https://schema.org",
     "@type": "Organization",
-    name: "SupoClip",
+    name: "MartClip",
     url: siteUrl,
     logo: `${siteUrl}/logo.png`,
     sameAs: ["https://github.com/FujiwaraChoki/supoclip", APP_STORE_URL],
@@ -49,7 +49,7 @@ const structuredData = [
   {
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
-    name: "SupoClip",
+    name: "MartClip",
     applicationCategory: "MultimediaApplication",
     operatingSystem: "Web, Docker",
     url: siteUrl,
@@ -72,13 +72,13 @@ const structuredData = [
   {
     "@context": "https://schema.org",
     "@type": "MobileApplication",
-    name: "SupoClip",
+    name: "MartClip",
     applicationCategory: "MultimediaApplication",
     operatingSystem: "iOS",
     url: APP_STORE_URL,
     installUrl: APP_STORE_URL,
     description:
-      "The SupoClip iOS app: clip long videos into captioned vertical shorts from your iPhone.",
+      "The MartClip iOS app: clip long videos into captioned vertical shorts from your iPhone.",
     offers: {
       "@type": "Offer",
       price: "0",
@@ -88,7 +88,7 @@ const structuredData = [
   {
     "@context": "https://schema.org",
     "@type": "WebSite",
-    name: "SupoClip",
+    name: "MartClip",
     url: siteUrl,
     description: "Open-source AI video clipping for short-form content.",
   },

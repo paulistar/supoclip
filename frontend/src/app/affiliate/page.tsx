@@ -17,9 +17,9 @@ const VIDEO = {
   uploadDate: "2026-10-09",
 };
 
-const title = "SupoClip Creator Program: Get Pro Free for Making Videos";
+const title = "MartClip Creator Program: Get Pro Free for Making Videos";
 const description =
-  "Make Shorts, Reels, TikToks or videos about SupoClip and get SupoClip Pro for free. Your audience gets 20% off their first 3 months with your code.";
+  "Make Shorts, Reels, TikToks or videos about MartClip and get MartClip Pro for free. Your audience gets 20% off their first 3 months with your code.";
 
 export const metadata: Metadata = {
   title: { absolute: title },
@@ -29,7 +29,7 @@ export const metadata: Metadata = {
     title,
     description,
     url: `${getSiteUrl()}/affiliate`,
-    siteName: "SupoClip",
+    siteName: "MartClip",
     type: "website",
     images: [{ url: `${getSiteUrl()}${VIDEO.poster}`, width: 1920, height: 1080 }],
     videos: [{ url: `${getSiteUrl()}${VIDEO.src}`, width: 1920, height: 1080, type: "video/mp4" }],
@@ -45,7 +45,7 @@ const steps = [
 
 const rules = [
   "Mark sponsored posts as such, for example with #ad.",
-  "Don't run ads on the SupoClip name or post your code on coupon or deal sites.",
+  "Don't run ads on the MartClip name or post your code on coupon or deal sites.",
   "Don't use your own code.",
   "We can end the program or remove a creator at any time.",
 ];
@@ -54,11 +54,11 @@ function getFaqs(proPrice: string) {
   return [
     {
       question: "Do I get paid in cash?",
-      answer: `Not right now. Approved creators get SupoClip Pro (normally $${proPrice}/month) for free while they're in the program.`,
+      answer: `Not right now. Approved creators get MartClip Pro (normally $${proPrice}/month) for free while they're in the program.`,
     },
     {
       question: "Is there a minimum number of followers?",
-      answer: "No. We look at what you post, not just how many people follow you. Small creators who already make videos about SupoClip are a great fit.",
+      answer: "No. We look at what you post, not just how many people follow you. Small creators who already make videos about MartClip are a great fit.",
     },
     {
       question: "What does my audience get?",
@@ -73,7 +73,7 @@ function getFaqs(proPrice: string) {
       answer: "You'll get an email, with a note from us when there's something specific. You can apply again after 30 days.",
     },
     {
-      question: "Do I need a SupoClip account?",
+      question: "Do I need a MartClip account?",
       answer: "Yes. The program is tied to your account, so you'll create a free one (or sign in) before applying.",
     },
   ];
@@ -90,14 +90,14 @@ export default function AffiliatePage() {
       {
         "@type": "BreadcrumbList",
         itemListElement: [
-          { "@type": "ListItem", position: 1, name: "SupoClip", item: siteUrl },
+          { "@type": "ListItem", position: 1, name: "MartClip", item: siteUrl },
           { "@type": "ListItem", position: 2, name: "Creator program", item: `${siteUrl}/affiliate` },
         ],
       },
       {
         "@type": "VideoObject",
-        name: "How the SupoClip creator program works",
-        description: "Apply, pick your code, and your audience gets 20% off their first 3 months. Approved creators get SupoClip Pro for free.",
+        name: "How the MartClip creator program works",
+        description: "Apply, pick your code, and your audience gets 20% off their first 3 months. Approved creators get MartClip Pro for free.",
         thumbnailUrl: `${siteUrl}${VIDEO.poster}`,
         contentUrl: `${siteUrl}${VIDEO.src}`,
         uploadDate: VIDEO.uploadDate,
@@ -120,8 +120,8 @@ export default function AffiliatePage() {
       <header className="border-b bg-background/95">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
           <Link href="/" className="flex items-center gap-2.5">
-            <Image src="/logo.png" alt="SupoClip" width={24} height={24} className="rounded-lg" />
-            <span className="text-lg font-bold tracking-tight">SupoClip</span>
+            <Image src="/logo.png" alt="MartClip" width={100} height={28} className="h-6 w-auto" />
+            <span className="text-lg font-bold tracking-tight">MartClip</span>
           </Link>
           <nav className="flex items-center gap-2" aria-label="Primary navigation">
             <Link href="/demo"><Button variant="ghost" size="sm">Demo</Button></Link>
@@ -134,11 +134,11 @@ export default function AffiliatePage() {
         <div className="mx-auto max-w-5xl px-6 py-14 md:py-20">
           <Badge variant="secondary">Creator program</Badge>
           <h1 className="mt-5 max-w-4xl text-4xl font-extrabold tracking-tight sm:text-5xl" style={{ fontFamily: "var(--font-syne), var(--font-geist-sans), system-ui" }}>
-            Make videos about SupoClip. Get Pro for free.
+            Make videos about MartClip. Get Pro for free.
           </h1>
           <p className="mt-6 max-w-3xl text-lg leading-8 text-muted-foreground">
             Posting Shorts, Reels or TikToks about clipping, podcasting or creator tools? Get your own code. Your audience saves on
-            SupoClip, and you get Pro while you&apos;re in the program.
+            MartClip, and you get Pro while you&apos;re in the program.
           </p>
           <div className="mt-8 flex flex-wrap items-center gap-3">
             <Link href={APPLY_HREF}><Button size="lg">Apply now <ArrowRight className="h-4 w-4" /></Button></Link>
@@ -167,7 +167,7 @@ export default function AffiliatePage() {
           <div className="mt-8 grid gap-4 md:grid-cols-2">
             <div className="rounded-2xl border p-6">
               <Gift className="h-5 w-5" />
-              <h3 className="mt-4 text-lg font-semibold">You get SupoClip Pro, free</h3>
+              <h3 className="mt-4 text-lg font-semibold">You get MartClip Pro, free</h3>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
                 Pro is normally ${proPrice}/month{pro ? ` and includes ${pro.generationLimit} videos a month` : ""}. Approved creators get it for
                 free for as long as they&apos;re in the program.
@@ -219,9 +219,9 @@ export default function AffiliatePage() {
         </section>
 
         <section className="mt-16 rounded-2xl border bg-foreground p-6 text-background md:p-8">
-          <h2 className="text-2xl font-bold tracking-tight">Already posting about SupoClip?</h2>
+          <h2 className="text-2xl font-bold tracking-tight">Already posting about MartClip?</h2>
           <p className="mt-2 max-w-xl text-sm leading-6 text-background/70">
-            Apply with a link to your profile and pick your code. If you&apos;ve made a video about SupoClip, include it.
+            Apply with a link to your profile and pick your code. If you&apos;ve made a video about MartClip, include it.
           </p>
           <div className="mt-6">
             <Link href={APPLY_HREF}><Button variant="secondary">Apply now <ArrowRight className="h-4 w-4" /></Button></Link>

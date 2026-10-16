@@ -92,7 +92,7 @@ export function Announcements({ userId, compact = false, landing = false }: {
       </PopoverTrigger>
       <PopoverContent align={landing ? "start" : "end"} sideOffset={8} collisionPadding={16} className="w-[min(22rem,calc(100vw-2rem))] rounded-2xl p-0" aria-label="Announcements">
         <div className="flex items-center justify-between border-b px-4 py-3">
-          <h2 className="font-display text-base font-semibold">What&apos;s new in SupoClip</h2>
+          <h2 className="font-display text-base font-semibold">What&apos;s new in MartClip</h2>
           <button type="button" onClick={() => setOpen(false)} aria-label="Close announcements" className="rounded-md p-1 text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <X className="size-4" aria-hidden />
           </button>

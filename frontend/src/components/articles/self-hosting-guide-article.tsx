@@ -9,12 +9,12 @@ const docs = (path: string) => `${GITHUB_URL}/blob/main/${path}`;
 
 const faqs: ArticleFaq[] = [
   {
-    question: "Is self-hosted SupoClip free?",
+    question: "Is self-hosted MartClip free?",
     answer:
       "The code is free under AGPL-3.0 and self-host mode has no generation limits or paywall. You still pay for your own hardware or server, and for any cloud transcription or LLM usage you configure. A Whisper + Ollama setup avoids per-request AI fees but needs enough local compute.",
   },
   {
-    question: "Can SupoClip run without any cloud AI services?",
+    question: "Can MartClip run without any cloud AI services?",
     answer:
       "Yes, for clip analysis. Set TRANSCRIPTION_PROVIDER=whisper to transcribe locally and LLM=ollama:<model> to select clips with a local model. Downloading YouTube links still needs internet access; uploaded files do not. Optional B-roll uses the Pexels API.",
   },
@@ -48,16 +48,16 @@ const toc: Array<[string, string]> = [
 
 export function SelfHostingGuideArticle({ post }: { post: BlogPost }) {
   return (
-    <ArticleShell post={post} breadcrumb="Self-host SupoClip" toc={toc} faqs={faqs}>
+    <ArticleShell post={post} breadcrumb="Self-host MartClip" toc={toc} faqs={faqs}>
       <p>
-        SupoClip is the open-source AI video clipper behind the hosted app at supoclip.com. The same repository
+        MartClip is the open-source AI video clipper behind the hosted app at supoclip.com. The same repository
         ships a Docker Compose stack you can run on a laptop, a home server, or a VPS. This guide follows that stack
         exactly as it exists in the <a href={GITHUB_URL}>repository</a>. Where a step depends on your provider or
         hardware, we say so instead of guessing.
       </p>
       <p>
-        Prefer not to run infrastructure? The <Link href="/sign-up">hosted app</Link> runs the same pipeline. Still
-        deciding between tools? Read our <Link href={OPUSCLIP_COMPARISON_HREF}>SupoClip vs OpusClip comparison</Link> first.
+        Prefer not to run infrastructure? The <Link href="/sign-in">hosted app</Link> runs the same pipeline. Still
+        deciding between tools? Read our <Link href={OPUSCLIP_COMPARISON_HREF}>MartClip vs OpusClip comparison</Link> first.
       </p>
 
       <h2 id="stack">What you are running</h2>
@@ -66,7 +66,7 @@ export function SelfHostingGuideArticle({ post }: { post: BlogPost }) {
       </p>
       <div className="overflow-x-auto rounded-lg border">
         <table className="w-full min-w-[520px] text-left text-sm leading-6">
-          <caption className="sr-only">Services in the SupoClip Docker Compose stack</caption>
+          <caption className="sr-only">Services in the MartClip Docker Compose stack</caption>
           <thead className="bg-muted"><tr><th scope="col" className="p-3">Service</th><th scope="col" className="p-3">Role</th><th scope="col" className="p-3">Host port</th></tr></thead>
           <tbody>
             {[
@@ -186,7 +186,7 @@ ollama pull gpt-oss:20b
       </p>
       <h3>Ollama in its own container</h3>
       <p>
-        Add it to the stack with an override file, then point SupoClip at the service name instead of the host:
+        Add it to the stack with an override file, then point MartClip at the service name instead of the host:
       </p>
       <CodeBlock label="docker-compose.override.yml (merge into any override you already have)">{`
 services:

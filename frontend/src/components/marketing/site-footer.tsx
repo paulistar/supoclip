@@ -18,7 +18,7 @@ export function SiteFooter() {
       heading: "Product",
       links: [
         ...getMarketingLinks("product").map(({ href, label }) => ({ href, label })),
-        { href: "/sign-up", label: "Start clipping" },
+        { href: "/sign-in", label: "Sign in" },
         { href: "/#pricing", label: "Pricing" },
         { href: "/affiliate", label: "Affiliate" },
         { href: "/status", label: "Service status" },
@@ -33,13 +33,13 @@ export function SiteFooter() {
       <div className="mx-auto grid max-w-6xl gap-10 sm:grid-cols-2 lg:grid-cols-[1.2fr_1fr_1fr_1fr]">
         <div>
           <Link href="/" className="flex items-center gap-2">
-            <Image src="/logo.png" alt="SupoClip" width={24} height={24} className="rounded-md" />
+            <Image src="/logo.png" alt="MartClip" width={100} height={28} className="h-6 w-auto" />
             <span className="text-sm font-semibold" style={{ fontFamily: "var(--font-syne), system-ui" }}>
-              SupoClip
+              MartClip
             </span>
           </Link>
           <p className="mt-3 max-w-xs text-xs leading-6 text-muted-foreground">
-            Open-source AI video clipper. Use the hosted app or run it on your own infrastructure.
+            AI video clipper by Mart Studios. Turn long videos into captioned short-form clips.
           </p>
           <div className="mt-4 flex gap-4 text-xs text-muted-foreground">
             <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer" className={linkClassName}>GitHub</a>

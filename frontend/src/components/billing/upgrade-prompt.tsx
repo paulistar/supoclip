@@ -193,7 +193,7 @@ export function UpgradeDialog({ open, onOpenChange, reason, billing, source }: U
 
           {state?.managedByAppStore ? (
             <p className="mt-6 rounded-xl border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
-              Your subscription is managed through the App Store. You can change plans in the SupoClip iOS app.
+              Your subscription is managed through the App Store. You can change plans in the MartClip iOS app.
             </p>
           ) : (
             <div className="mt-6 space-y-2" role="radiogroup" aria-label="Plans">
@@ -218,7 +218,7 @@ export function UpgradeDialog({ open, onOpenChange, reason, billing, source }: U
                 <span className="text-sm font-semibold">Free</span>
               </div>
               <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-                Run SupoClip on your own computer with no subscription or monthly video limit.
+                Run MartClip on your own computer with no subscription or monthly video limit.
                 Setup required; you provide the hardware and any paid AI services you choose.
               </p>
               <Link

@@ -228,10 +228,10 @@ export default function LandingPage() {
           <Link href="/" className="flex items-center gap-2.5 group">
             <Image
               src="/logo.png"
-              alt="SupoClip"
-              width={24}
-              height={24}
-              className="rounded-lg transition-transform group-hover:scale-105"
+              alt="MartClip"
+              width={120}
+              height={32}
+              className="h-7 w-auto transition-transform group-hover:scale-105"
             />
             <span
               className="text-lg font-bold tracking-tight"
@@ -240,7 +240,7 @@ export default function LandingPage() {
                   "var(--font-syne), var(--font-geist-sans), system-ui",
               }}
             >
-              SupoClip
+              MartClip
             </span>
           </Link>
 
@@ -292,7 +292,7 @@ export default function LandingPage() {
                     Sign In
                   </Button>
                 </Link>
-                <Link href="/sign-up">
+                <Link href="/sign-in">
                   <Button size="sm">Get Started</Button>
                 </Link>
               </>
@@ -373,7 +373,7 @@ export default function LandingPage() {
                         Sign In
                       </Button>
                     </Link>
-                    <Link href="/sign-up" onClick={() => setMobileNavOpen(false)}>
+                    <Link href="/sign-in" onClick={() => setMobileNavOpen(false)}>
                       <Button size="sm" className="w-full">Get Started</Button>
                     </Link>
                   </>
@@ -448,7 +448,7 @@ export default function LandingPage() {
                 }}
               >
                 {authEnabled ? (
-                  <Link href="/sign-up">
+                  <Link href="/sign-in">
                     <Button size="lg" className="px-8 h-12 text-sm">
                       Start Clipping
                       <ArrowRight className="w-4 h-4" />
@@ -476,7 +476,7 @@ export default function LandingPage() {
                   href={APP_STORE_URL}
                   target="_blank"
                   rel="noopener noreferrer"
-                  aria-label="Download SupoClip on the App Store"
+                  aria-label="Download MartClip on the App Store"
                   className="flex items-center"
                 >
                   <Image
@@ -520,7 +520,7 @@ export default function LandingPage() {
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src={PRODUCT_HUNT_BADGE_URL}
-                  alt="SupoClip - Open-source AI clipper: long videos into viral shorts | Product Hunt"
+                  alt="MartClip - Open-source AI clipper: long videos into viral shorts | Product Hunt"
                   width={250}
                   height={54}
                 />
@@ -773,7 +773,7 @@ export default function LandingPage() {
                         </a>
                       </div>
                     ) : authEnabled ? (
-                      <Link href="/sign-up">
+                      <Link href="/sign-in">
                         <Button
                           className={`w-full h-11 text-sm ${
                             plan.highlighted
@@ -891,7 +891,7 @@ export default function LandingPage() {
                     <Button variant="outline">Self-hosting guide</Button>
                   </Link>
                   {authEnabled ? (
-                    <Link href="/sign-up">
+                    <Link href="/sign-in">
                       <Button variant="outline">
                         Try the hosted version
                         <ArrowRight className="w-4 h-4" />
@@ -925,7 +925,7 @@ export default function LandingPage() {
               Learn the complete clipping workflow
             </h2>
             <p className="mx-auto mt-4 max-w-2xl text-sm leading-7 text-muted-foreground">
-              Practical, source-backed pages for choosing a video clipper, self-hosting SupoClip,
+              Practical, source-backed pages for choosing a video clipper, self-hosting MartClip,
               and turning long recordings into short-form content.
             </p>
           </ScrollReveal>
@@ -967,7 +967,7 @@ export default function LandingPage() {
             or self-host the open-source version for free.
           </p>
           {authEnabled ? (
-            <Link href="/sign-up">
+            <Link href="/sign-in">
               <Button size="lg" className="px-10 h-12 text-sm">
                 Get Started
                 <ArrowRight className="w-4 h-4" />

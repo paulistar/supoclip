@@ -1,13 +1,6 @@
-import { SignUp } from "@/components/auth/sign-up";
-import { AuthFrame } from "@/components/auth/auth-frame";
-import Link from "next/link";
+import { redirect } from "next/navigation";
 
+/** Public registration is closed for now; keep login available. */
 export default function SignUpPage() {
-  return (
-    <AuthFrame
-      footer={<>Already have an account?{" "}<Link href="/sign-in" className="font-medium text-foreground underline-offset-4 hover:underline">Sign in</Link></>}
-    >
-      <SignUp />
-    </AuthFrame>
-  );
+  redirect("/sign-in");
 }

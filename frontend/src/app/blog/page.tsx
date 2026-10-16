@@ -9,19 +9,19 @@ import { HOSTED_APP_URL, blogPosts, getSiteUrl } from "@/lib/blog-posts";
 import { getMarketingLinks } from "@/lib/marketing-links";
 
 export const metadata: Metadata = {
-  title: { absolute: "SupoClip Blog | AI Video Clipping Guides" },
+  title: { absolute: "MartClip Blog | AI Video Clipping Guides" },
   description:
-    "Practical guides, product comparisons, and creator workflows for turning long-form video into social-ready shorts with SupoClip.",
+    "Practical guides, product comparisons, and creator workflows for turning long-form video into social-ready shorts with MartClip.",
   alternates: {
     canonical: `${getSiteUrl()}/blog`,
   },
   openGraph: {
-    title: "SupoClip Blog",
+    title: "MartClip Blog",
     description:
       "Guides and comparisons for AI video clipping, auto captions, vertical reframing, and short-form video workflows.",
     type: "website",
     url: `${getSiteUrl()}/blog`,
-    siteName: "SupoClip",
+    siteName: "MartClip",
   },
 };
 
@@ -33,12 +33,12 @@ export default function BlogIndexPage() {
       <header className="border-b bg-background/95">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
           <Link href="/" className="flex items-center gap-2.5">
-            <Image src="/logo.png" alt="SupoClip" width={24} height={24} className="rounded-lg" />
+            <Image src="/logo.png" alt="MartClip" width={100} height={28} className="h-6 w-auto" />
             <span
               className="text-lg font-bold tracking-tight"
               style={{ fontFamily: "var(--font-syne), var(--font-geist-sans), system-ui" }}
             >
-              SupoClip
+              MartClip
             </span>
           </Link>
           <div className="flex items-center gap-2">
@@ -48,7 +48,7 @@ export default function BlogIndexPage() {
                 <ExternalLink className="h-3.5 w-3.5" />
               </Button>
             </a>
-            <Link href="/sign-up">
+            <Link href="/sign-in">
               <Button size="sm">Start Clipping</Button>
             </Link>
           </div>
@@ -65,7 +65,7 @@ export default function BlogIndexPage() {
             <a href={HOSTED_APP_URL} target="_blank" rel="noopener noreferrer">
               <Badge variant="outline" className="gap-2">
                 <ExternalLink className="h-3.5 w-3.5" />
-                Try hosted SupoClip
+                Try hosted MartClip
               </Badge>
             </a>
           </div>

@@ -149,7 +149,7 @@ export default function ApiKeysPage() {
             <h1 className="font-display text-3xl font-bold tracking-tight">Agents &amp; API</h1>
             <p className="mt-2 text-muted-foreground">
               Let Claude, Cursor and other AI agents clip videos for you through the{" "}
-              <span className="font-medium text-foreground">SupoClip MCP server</span>, or call the REST API
+              <span className="font-medium text-foreground">MartClip MCP server</span>, or call the REST API
               from your own code. Treat keys like passwords; they grant full access to your account.
             </p>
           </div>

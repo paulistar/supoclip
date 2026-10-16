@@ -15,7 +15,7 @@ const presentations: Record<string, { label: string; badge: string; border: stri
 
 export const metadata: Metadata = {
   title: "Service status",
-  description: "Current service status and incident updates for SupoClip.",
+  description: "Current service status and incident updates for MartClip.",
   robots: { index: false, follow: true },
 };
 
@@ -29,8 +29,8 @@ export default async function StatusPage() {
       <header className="border-b bg-background">
         <div className="mx-auto flex h-16 max-w-3xl items-center justify-between px-6">
           <Link href="/" className="flex items-center gap-2.5">
-            <Image src="/logo.png" alt="" width={24} height={24} className="rounded-lg" />
-            <span className="font-display text-lg font-bold">SupoClip</span>
+            <Image src="/logo.png" alt="" width={100} height={28} className="h-6 w-auto" />
+            <span className="font-display text-lg font-bold">MartClip</span>
           </Link>
           <span className="text-sm text-muted-foreground">Service status</span>
         </div>
@@ -40,7 +40,7 @@ export default async function StatusPage() {
         <h1 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">
           Service status
         </h1>
-        <p className="mt-3 text-muted-foreground">Updates on the SupoClip hosted service.</p>
+        <p className="mt-3 text-muted-foreground">Updates on the MartClip hosted service.</p>
 
         {!statuses?.length && (
           <p role="status" className="mt-8 rounded-2xl border bg-background p-6 text-muted-foreground">
@@ -74,7 +74,7 @@ export default async function StatusPage() {
 
         <Link href="/" className="mt-8 inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground">
           <ArrowLeft aria-hidden="true" className="size-4" />
-          Back to SupoClip
+          Back to MartClip
         </Link>
       </div>
     </main>

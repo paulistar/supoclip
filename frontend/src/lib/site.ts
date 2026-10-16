@@ -1,4 +1,4 @@
-export const SITE_NAME = "SupoClip";
+export const SITE_NAME = "MartClip";
 export const DEFAULT_SITE_URL = "https://www.supoclip.com";
 export const HOSTED_APP_URL = DEFAULT_SITE_URL;
 export const GITHUB_URL = "https://github.com/FujiwaraChoki/supoclip";

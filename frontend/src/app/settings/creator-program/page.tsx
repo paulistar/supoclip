@@ -35,7 +35,7 @@ const AUDIENCE_SIZES = [
 
 const TERMS = [
   "Mark sponsored posts as such (for example #ad).",
-  "Don't run ads on the SupoClip name or post your code on coupon or deal sites.",
+  "Don't run ads on the MartClip name or post your code on coupon or deal sites.",
   "Don't use your own code.",
   "We can end the program or remove a creator at any time.",
 ];
@@ -164,7 +164,7 @@ export default function CreatorProgramPage() {
       <main className="mx-auto max-w-md px-4 py-24 text-center">
         <p className="mb-4 text-muted-foreground">Create a free account or sign in to apply to the creator program.</p>
         <div className="flex justify-center gap-2">
-          <Link href={`/sign-up?next=${encodeURIComponent(APPLY_PATH)}`}><Button>Create account</Button></Link>
+          <Link href={`/sign-in?next=${encodeURIComponent(APPLY_PATH)}`}><Button>Create account</Button></Link>
           <Link href={`/sign-in?next=${encodeURIComponent(APPLY_PATH)}`}><Button variant="outline">Sign in</Button></Link>
         </div>
       </main>
@@ -180,8 +180,8 @@ export default function CreatorProgramPage() {
       <div className="mb-8">
         <h1 className="font-display text-3xl font-bold tracking-tight">Creator program</h1>
         <p className="mt-2 text-muted-foreground">
-          Making videos about SupoClip? Get your own code: your audience gets{" "}
-          <span className="font-medium text-foreground">20% off their first 3 months</span>, and you get SupoClip Pro for free.{" "}
+          Making videos about MartClip? Get your own code: your audience gets{" "}
+          <span className="font-medium text-foreground">20% off their first 3 months</span>, and you get MartClip Pro for free.{" "}
           <Link href="/affiliate" className="underline underline-offset-4 hover:text-foreground">How it works</Link>
         </p>
       </div>
@@ -291,12 +291,12 @@ export default function CreatorProgramPage() {
           </div>
 
           <div>
-            <Label htmlFor="video-url">A video you made about SupoClip <span className="font-normal text-muted-foreground">(optional)</span></Label>
+            <Label htmlFor="video-url">A video you made about MartClip <span className="font-normal text-muted-foreground">(optional)</span></Label>
             <Input id="video-url" type="url" value={videoUrl} onChange={(event) => setVideoUrl(event.target.value)} placeholder="https://" className="mt-1.5" />
           </div>
 
           <div>
-            <Label htmlFor="plan">How will you promote SupoClip? <span className="font-normal text-muted-foreground">(optional)</span></Label>
+            <Label htmlFor="plan">How will you promote MartClip? <span className="font-normal text-muted-foreground">(optional)</span></Label>
             <Textarea id="plan" value={promotionPlan} onChange={(event) => setPromotionPlan(event.target.value)} maxLength={1000} rows={3} className="mt-1.5" />
           </div>
 

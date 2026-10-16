@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 /**
- * Line-art loop of what SupoClip does: a long video is scanned, its best
+ * Line-art loop of what MartClip does: a long video is scanned, its best
  * moments are marked, scissors cut them out, and they become vertical clips.
  * Everything is drawn in currentColor.
  */

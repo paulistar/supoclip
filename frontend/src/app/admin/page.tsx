@@ -293,7 +293,7 @@ export default async function AdminPage({
                       <a href={affiliate.profile_url} target="_blank" rel="noopener noreferrer" className="font-medium capitalize underline-offset-4 hover:underline">{affiliate.platform}</a>
                       <p className="text-xs text-muted-foreground">{affiliate.audience_size} followers</p>
                       {affiliate.video_url && (
-                        <a href={affiliate.video_url} target="_blank" rel="noopener noreferrer" className="text-xs underline-offset-4 hover:underline">SupoClip video</a>
+                        <a href={affiliate.video_url} target="_blank" rel="noopener noreferrer" className="text-xs underline-offset-4 hover:underline">MartClip video</a>
                       )}
                     </td>
                     <td className={cn(td, "max-w-xs text-xs text-muted-foreground")}>{affiliate.promotion_plan || "—"}</td>

@@ -82,7 +82,7 @@ export default function SharedGenerationPage() {
     <header className="sticky top-0 z-30 border-b bg-background/80 backdrop-blur">
       <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-4 sm:px-8">
         <Link href="/" className="flex items-center gap-2 font-display text-lg font-bold tracking-tight">
-          <Image src="/logo.png" alt="" width={22} height={22} className="size-[22px]" priority />SupoClip
+          <Image src="/logo.png" alt="MartClip" width={100} height={28} className="h-6 w-auto" priority /><span>MartClip</span>
         </Link>
         <Button asChild size="sm" className="rounded-full">
           <Link href="/"><Sparkles className="size-4" />Make your own</Link>
@@ -167,10 +167,10 @@ export default function SharedGenerationPage() {
           <div className="relative flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
             <div>
               <h2 className="font-display text-2xl font-bold tracking-tight">Turn your long videos into clips like these.</h2>
-              <p className="mt-2 max-w-lg text-sm text-white/65">SupoClip finds the best moments, frames the speaker and writes the captions. Open source and free to self-host.</p>
+              <p className="mt-2 max-w-lg text-sm text-white/65">MartClip finds the best moments, frames the speaker and writes the captions. Open source and free to self-host.</p>
             </div>
             <Button asChild size="lg" className="shrink-0 rounded-full bg-white text-stone-950 hover:bg-white/90">
-              <Link href="/">Try SupoClip<ArrowRight className="size-4" /></Link>
+              <Link href="/">Try MartClip<ArrowRight className="size-4" /></Link>
             </Button>
           </div>
         </section>

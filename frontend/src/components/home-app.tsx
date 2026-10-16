@@ -898,7 +898,7 @@ function PlanStatusNudge({
       <UpgradeNudge
         className="mt-6"
         title={`You've clipped all ${state.limit} videos this period`}
-        description={nextPlan ? `${refreshes} Or keep going with ${nextPlan.name}: ${nextPlan.generationLimit} a month.` : state.managedByAppStore ? `${refreshes} You can change plans in the SupoClip iOS app.` : refreshes}
+        description={nextPlan ? `${refreshes} Or keep going with ${nextPlan.name}: ${nextPlan.generationLimit} a month.` : state.managedByAppStore ? `${refreshes} You can change plans in the MartClip iOS app.` : refreshes}
         action={nextPlan ? `Get ${nextPlan.name}` : undefined}
         onAction={nextPlan ? () => onUpgrade({ kind: "limit" }) : undefined}
       />

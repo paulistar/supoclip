@@ -77,8 +77,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         )}
       >
         <Link href="/" className={cn("flex h-14 items-center gap-2 font-display text-lg font-bold tracking-tight", compact ? "justify-center" : "px-2")}>
-          <Image src="/logo.png" alt="" width={24} height={24} className="size-6" priority />
-          {!compact && "SupoClip"}
+          <Image src="/logo.png" alt="MartClip" width={120} height={32} className="h-7 w-auto" priority />
+          {!compact && "MartClip"}
         </Link>
 
         <SidebarLink compact={compact} href="/" label="New generation" shortcut="N" className="mb-4 mt-1 bg-foreground text-background hover:bg-foreground/90 hover:text-background">
@@ -119,7 +119,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className={cn(user && "flex min-w-0 flex-1 flex-col pb-[calc(4rem+env(safe-area-inset-bottom))] md:pb-0")}>
         {user ? <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b bg-background/80 px-4 backdrop-blur md:hidden">
           <Link href="/" className="flex items-center gap-2 font-display text-lg font-bold tracking-tight">
-            <Image src="/logo.png" alt="" width={22} height={22} className="size-[22px]" />SupoClip
+            <Image src="/logo.png" alt="MartClip" width={100} height={28} className="h-6 w-auto" /><span>MartClip</span>
           </Link>
           <div className="flex items-center gap-1">
             <Announcements key={user.id} userId={user.id} compact />

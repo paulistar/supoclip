@@ -9,18 +9,18 @@ const LAST_UPDATED = "July 2, 2026";
 const CONTACT_EMAIL = "support@supoclip.com";
 
 export const metadata: Metadata = {
-  title: "Terms of Service | SupoClip",
+  title: "Terms of Service | MartClip",
   description:
-    "The terms that govern your use of the SupoClip apps and hosted video-clipping service, including subscriptions purchased on the web or through the App Store.",
+    "The terms that govern your use of the MartClip apps and hosted video-clipping service, including subscriptions purchased on the web or through the App Store.",
   alternates: {
     canonical: `${getSiteUrl()}/terms`,
   },
   openGraph: {
-    title: "SupoClip Terms of Service",
-    description: "The terms that govern your use of SupoClip.",
+    title: "MartClip Terms of Service",
+    description: "The terms that govern your use of MartClip.",
     type: "website",
     url: `${getSiteUrl()}/terms`,
-    siteName: "SupoClip",
+    siteName: "MartClip",
   },
 };
 
@@ -44,12 +44,12 @@ export default function TermsOfServicePage() {
       <header className="border-b bg-background/95">
         <div className="mx-auto flex h-16 max-w-3xl items-center justify-between px-6">
           <Link href="/" className="flex items-center gap-2.5">
-            <Image src="/logo.png" alt="SupoClip" width={24} height={24} className="rounded-lg" />
+            <Image src="/logo.png" alt="MartClip" width={100} height={28} className="h-6 w-auto" />
             <span
               className="text-lg font-bold tracking-tight"
               style={{ fontFamily: "var(--font-syne), var(--font-geist-sans), system-ui" }}
             >
-              SupoClip
+              MartClip
             </span>
           </Link>
           <a href={HOSTED_APP_URL} target="_blank" rel="noopener noreferrer">
@@ -75,14 +75,14 @@ export default function TermsOfServicePage() {
         <div className="mt-12 space-y-10">
           <Section title="Agreement">
             <p>
-              These Terms of Service (&ldquo;Terms&rdquo;) govern your use of the SupoClip apps and
+              These Terms of Service (&ldquo;Terms&rdquo;) govern your use of the MartClip apps and
               hosted service (the &ldquo;Service&rdquo;), which turn long-form videos into short,
               captioned clips. By creating an account or using the Service you agree to these Terms.
               If you do not agree, do not use the Service.
             </p>
             <p>
-              SupoClip is also available as open-source software you can self-host. These Terms
-              apply to the SupoClip-operated hosted service; self-hosted instances are governed by
+              MartClip is also available as open-source software you can self-host. These Terms
+              apply to the MartClip-operated hosted service; self-hosted instances are governed by
               the applicable open-source license and the operator&rsquo;s own terms.
             </p>
           </Section>
@@ -150,7 +150,7 @@ export default function TermsOfServicePage() {
 
           <Section title="Intellectual Property">
             <p>
-              The Service, including its software, design, and branding, is owned by SupoClip or its
+              The Service, including its software, design, and branding, is owned by MartClip or its
               licensors. The open-source components are licensed under their respective licenses.
               These Terms do not grant you any rights to our trademarks.
             </p>
@@ -168,7 +168,7 @@ export default function TermsOfServicePage() {
 
           <Section title="Limitation of Liability">
             <p>
-              To the fullest extent permitted by law, SupoClip will not be liable for indirect,
+              To the fullest extent permitted by law, MartClip will not be liable for indirect,
               incidental, special, consequential, or punitive damages, or for lost profits, data, or
               goodwill. Our aggregate liability for claims relating to the Service is limited to the
               amount you paid us in the twelve months before the claim arose.
@@ -207,7 +207,7 @@ export default function TermsOfServicePage() {
           </Link>
           <span className="mx-2">&middot;</span>
           <Link href="/" className="underline hover:text-foreground">
-            Back to SupoClip
+            Back to MartClip
           </Link>
         </div>
       </article>

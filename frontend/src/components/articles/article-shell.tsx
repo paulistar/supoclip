@@ -62,7 +62,7 @@ export function ArticleShell({
         datePublished: post.publishedAt,
         dateModified: post.updatedAt,
         author: { "@type": "Organization", name: post.author },
-        publisher: { "@type": "Organization", name: "SupoClip", url: siteUrl, logo: { "@type": "ImageObject", url: `${siteUrl}/logo.png` } },
+        publisher: { "@type": "Organization", name: "MartClip", url: siteUrl, logo: { "@type": "ImageObject", url: `${siteUrl}/logo.png` } },
         articleSection: post.category,
         keywords: post.keywords.join(", "),
         inLanguage: "en",
@@ -85,11 +85,11 @@ export function ArticleShell({
       <header className="border-b">
         <nav aria-label="Blog navigation" className="mx-auto flex max-w-5xl items-center justify-between gap-4 px-6 py-5">
           <Link href="/" className="flex items-center gap-2.5 text-xl font-bold">
-            <Image src="/logo.png" alt="" width={30} height={30} className="rounded-lg" />SupoClip
+            <Image src="/logo.png" alt="MartClip" width={120} height={32} className="h-7 w-auto" /><span>MartClip</span>
           </Link>
           <div className="flex items-center gap-5 text-sm">
             <Link href="/blog" className="underline underline-offset-4">All articles</Link>
-            <Link href="/sign-up" className="hidden rounded-lg bg-foreground px-4 py-2 font-semibold text-background sm:inline-flex">Start clipping</Link>
+            <Link href="/sign-in" className="hidden rounded-lg bg-foreground px-4 py-2 font-semibold text-background sm:inline-flex">Start clipping</Link>
           </div>
         </nav>
       </header>
@@ -102,7 +102,7 @@ export function ArticleShell({
           <h1 className="text-4xl font-extrabold leading-[1.08] tracking-tight sm:text-6xl" style={{ fontFamily: "var(--font-syne), var(--font-geist-sans), sans-serif" }}>{post.title}</h1>
           <p className="text-xl leading-8 text-muted-foreground">{post.summary}</p>
           <p className="text-sm text-muted-foreground">
-            By SupoClip · Updated <time dateTime={post.updatedAt}>{formatArticleDate(post.updatedAt)}</time> · {post.readingTime}
+            By MartClip · Updated <time dateTime={post.updatedAt}>{formatArticleDate(post.updatedAt)}</time> · {post.readingTime}
           </p>
         </header>
         <nav aria-label="In this article" className="mb-10 flex flex-wrap gap-x-5 gap-y-2 border-y py-4 text-sm font-medium">
@@ -117,11 +117,11 @@ export function ArticleShell({
               <p>{answer}</p>
             </section>
           ))}
-          <section className="not-prose rounded-2xl border bg-muted/30 p-6 sm:p-8" aria-label="Start with SupoClip">
+          <section className="not-prose rounded-2xl border bg-muted/30 p-6 sm:p-8" aria-label="Start with MartClip">
             <h2 className="!pt-0 text-2xl font-bold">Try it on one recording you know well.</h2>
             <p className="mt-2 text-muted-foreground">Use the hosted app, or run the same open-source code on your own machine.</p>
             <div className="mt-5 flex flex-wrap gap-3">
-              <Link href="/sign-up" className="inline-flex items-center gap-2 rounded-lg bg-foreground px-5 py-3 text-sm font-semibold !text-background !no-underline">Start clipping<ArrowRight className="h-4 w-4" /></Link>
+              <Link href="/sign-in" className="inline-flex items-center gap-2 rounded-lg bg-foreground px-5 py-3 text-sm font-semibold !text-background !no-underline">Start clipping<ArrowRight className="h-4 w-4" /></Link>
               <a href={GITHUB_URL} className="inline-flex items-center gap-2 rounded-lg border px-5 py-3 text-sm font-semibold !no-underline"><Github className="h-4 w-4" />Get the source</a>
             </div>
           </section>
