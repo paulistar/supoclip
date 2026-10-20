@@ -17,6 +17,7 @@ from src.ai import (
     build_transcript_analysis_prompt,
     transcript_analysis_system_prompt,
 )
+from src.clip_selection import ClipSelectionPrefs
 
 
 def test_system_prompt_enforces_grounding_rules():
@@ -40,6 +41,22 @@ def test_system_prompt_enforces_grounding_rules():
     assert "Do not use \"segment\" as an output field. Use \"text\"." in (
         transcript_analysis_system_prompt
     )
+    assert "SHORT-FORM RETENTION (WATCH + hook-writer)" in (
+        transcript_analysis_system_prompt
+    )
+    assert "Cash the promise" in transcript_analysis_system_prompt
+    assert "Win the first ~3 seconds" in transcript_analysis_system_prompt
+
+
+def test_build_transcript_analysis_prompt_includes_watch_brief_guidance():
+    prompt = build_transcript_analysis_prompt(
+        transcript="[00:12 - 00:21] A strong opening line",
+        prefs=ClipSelectionPrefs(brief="Prioritize curiosity hooks for paid traffic"),
+    )
+    assert "User brief" in prompt
+    assert "Prioritize curiosity hooks for paid traffic" in prompt
+    assert "cash the promise" in prompt
+    assert "Win the first ~3s" in prompt or "win the first ~3s" in prompt
 
 
 def test_build_transcript_analysis_prompt_requires_transcript_fidelity():

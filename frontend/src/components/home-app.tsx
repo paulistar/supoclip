@@ -31,7 +31,6 @@ import { formatSupportMessage, parseApiError } from "@/lib/api-error";
 import { buildFontOptionsPayload, FONT_TEMPLATE_DEFAULT_VALUE } from "@/lib/font-options";
 import { fetchGenerations, greeting, type GenerationSummary } from "@/lib/generations";
 import {
-  CLIP_BRIEF_MAX_CHARS,
   DURATION_PRESETS,
   MIN_CLIPS_OPTIONS,
   clampMinClipsChoice,
@@ -748,15 +747,16 @@ export default function HomeApp() {
             <div className="space-y-1.5 border-t px-3 py-3 sm:px-4">
               <div className="flex items-center justify-between gap-3">
                 <label htmlFor="clip-brief" className="text-xs font-medium text-muted-foreground">Brief do corte</label>
-                <span className="text-[11px] text-muted-foreground">{clipBrief.length}/{CLIP_BRIEF_MAX_CHARS}</span>
+                {clipBrief.length > 0 ? (
+                  <span className="text-[11px] text-muted-foreground">{clipBrief.length}</span>
+                ) : null}
               </div>
               <Textarea
                 id="clip-brief"
                 value={clipBrief}
-                maxLength={CLIP_BRIEF_MAX_CHARS}
                 disabled={controlsDisabled}
-                onChange={(event) => setClipBrief(event.target.value.slice(0, CLIP_BRIEF_MAX_CHARS))}
-                placeholder="Hook forte nos primeiros segundos, não terminar no meio da ideia, tom para redes e tráfego pago…"
+                onChange={(event) => setClipBrief(event.target.value)}
+                placeholder="Hook nos primeiros 3s (curiosidade ou stakes), arco completo com payoff, tom para redes e tráfego pago…"
                 className="min-h-[72px] resize-y bg-transparent text-sm"
               />
             </div>

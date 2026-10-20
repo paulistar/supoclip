@@ -1,4 +1,7 @@
-export const CLIP_BRIEF_MAX_CHARS = 800;
+/** Soft safety cap only — UI has no hard maxlength; excess is truncated. */
+export const CLIP_BRIEF_SOFT_MAX = 50_000;
+/** @deprecated Use CLIP_BRIEF_SOFT_MAX */
+export const CLIP_BRIEF_MAX_CHARS = CLIP_BRIEF_SOFT_MAX;
 export const CLIP_PREFS_STORAGE_KEY = "supoclip.clipSelectionPrefs.v1";
 
 export type DurationPresetId =
@@ -150,7 +153,10 @@ export function loadStoredClipPrefs(): StoredClipPrefs | null {
     const minClips = MIN_CLIPS_OPTIONS.includes(parsed.minClips as MinClipsChoice)
       ? (parsed.minClips as MinClipsChoice)
       : "auto";
-    const clipBrief = typeof parsed.clipBrief === "string" ? parsed.clipBrief.slice(0, CLIP_BRIEF_MAX_CHARS) : "";
+    const clipBrief =
+      typeof parsed.clipBrief === "string"
+        ? parsed.clipBrief.slice(0, CLIP_BRIEF_SOFT_MAX)
+        : "";
     return { clipDurationPreset: preset, minClips, clipBrief };
   } catch {
     return null;
@@ -160,12 +166,16 @@ export function loadStoredClipPrefs(): StoredClipPrefs | null {
 export function saveStoredClipPrefs(prefs: StoredClipPrefs) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(CLIP_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+    const safe: StoredClipPrefs = {
+      ...prefs,
+      clipBrief: prefs.clipBrief.slice(0, CLIP_BRIEF_SOFT_MAX),
+    };
+    window.localStorage.setItem(CLIP_PREFS_STORAGE_KEY, JSON.stringify(safe));
   } catch {
     // ignore quota / private mode
   }
 }
 
 export function normalizeClipBrief(value: string): string {
-  return value.replace(/\s+/g, " ").trim().slice(0, CLIP_BRIEF_MAX_CHARS);
+  return value.replace(/\s+/g, " ").trim().slice(0, CLIP_BRIEF_SOFT_MAX);
 }

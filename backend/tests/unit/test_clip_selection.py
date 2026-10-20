@@ -1,6 +1,8 @@
 from src.clip_selection import (
+    CLIP_BRIEF_MAX_CHARS,
     ClipSelectionPrefs,
     auto_clip_count,
+    normalize_clip_brief,
     parse_clip_selection_prefs,
     physical_max_clips,
     resolve_clip_budget,
@@ -22,6 +24,18 @@ def test_parse_defaults_and_brief():
     assert prefs.duration_preset == "long"
     assert prefs.min_clips == 15
     assert prefs.brief == "Hook forte"
+
+
+def test_clip_brief_accepts_over_800_and_soft_truncates():
+    long_brief = "x" * 801
+    assert normalize_clip_brief(long_brief) == long_brief
+    prefs = parse_clip_selection_prefs(clip_brief=long_brief)
+    assert prefs.brief == long_brief
+
+    oversized = "y" * (CLIP_BRIEF_MAX_CHARS + 50)
+    truncated = normalize_clip_brief(oversized)
+    assert len(truncated) == CLIP_BRIEF_MAX_CHARS
+    assert truncated == "y" * CLIP_BRIEF_MAX_CHARS
 
 
 def test_auto_quantity_keeps_legacy_density_for_auto_preset():

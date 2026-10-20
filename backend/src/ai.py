@@ -23,6 +23,7 @@ from pydantic_ai.providers.openrouter import OpenRouterProvider
 from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from .clip_selection import (
+    CLIP_BRIEF_MAX_CHARS,
     ClipSelectionPrefs,
     parse_clip_selection_prefs,
     resolve_clip_budget,
@@ -38,7 +39,7 @@ IDEAL_CLIP_MIN_SECONDS = 25
 IDEAL_CLIP_MAX_SECONDS = 50
 MIN_ACCEPTED_CLIP_SECONDS = 20
 MAX_ACCEPTED_CLIP_SECONDS = 60
-TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v7-clip-prefs"
+TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v8-watch-hooks"
 TRANSCRIPT_ANALYSIS_MAX_ATTEMPTS = 3
 TRANSCRIPT_ANALYSIS_TIMEOUT_SECONDS = 600
 # Long transcripts are analysed in overlapping windows so every part of the
@@ -457,6 +458,15 @@ SCORING AND OUTPUT RULES:
 - summary and key_topics must also stay grounded in the transcript and should not add outside interpretation
 - When a user brief is provided in the task prompt, treat it as editorial priority for social/paid use while staying grounded
 
+SHORT-FORM RETENTION (WATCH + hook-writer) — apply to every segment, with or without a user brief:
+- W — Win the first ~3 seconds: the start of the span must open a real gap (curiosity, stakes, contrarian with receipts, emotional cold-open, or a specific concrete claim). Prefer spans whose opening lands the hook immediately — no warm-up intros.
+- Hook honesty: extract the hook from what the transcript actually delivers; reject bait that the clip cannot pay off (over-promise → mid-clip retention cliff).
+- Specificity beats abstraction: a real number, named entity, or sharp claim scores higher than vague advice.
+- A — Arc with open loops: setup → tension → payoff inside the same contiguous span; resolve the loop before the cut; never end mid-thought when contiguous lines can complete it.
+- C — Cash the promise: the ending must close what the opening opened.
+- Retention pacing: prefer moments with idea/emotion shifts across the clip, not a single quotable line with dead air around it.
+- Watch-through over vanity: rank for un-skippable standalone retention (social + paid), not topic importance alone.
+
 Find the number of compelling segments requested in the task that would work well as standalone clips. Prefer meeting the requested count with strong clips; do not pad with weak filler. Every selected segment must be accurate, self-contained, have proper time ranges, and score high on virality metrics."""
 
 # Lazy-loaded agent to avoid import-time failures when API keys aren't set
@@ -751,12 +761,19 @@ def build_transcript_analysis_prompt(
         )
     brief_section = ""
     if selection.brief:
+        truncated_note = (
+            " (brief truncated)"
+            if len(selection.brief) >= CLIP_BRIEF_MAX_CHARS
+            else ""
+        )
         brief_section = (
-            "\n\nUser brief (editorial priority for this generation — reinforce, do not invent):\n"
+            "\n\nUser brief (editorial priority for this generation — reinforce, do not invent)"
+            f"{truncated_note}:\n"
             f"{selection.brief}\n\n"
-            "Apply this brief while staying fully grounded in the transcript. Prioritize strong "
-            "hooks for scroll-stopping social/paid use, complete context, and endings that do not "
-            "cut mid-thought."
+            "Apply this brief while staying fully grounded in the transcript. Reinforce WATCH "
+            "retention: win the first ~3s with an honest gap extracted from the content, cash "
+            "the promise by the end of the span, keep a complete arc (no mid-thought cut), and "
+            "prefer specific claims over vague advice — for scroll-stopping social/paid use."
         )
 
     return f"""Analyze this video transcript and identify the most engaging segments for short-form content.

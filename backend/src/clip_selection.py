@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from math import ceil
 from typing import Any, Mapping
 
-CLIP_BRIEF_MAX_CHARS = 800
+# Soft safety cap only — never reject with 400; truncate instead.
+CLIP_BRIEF_MAX_CHARS = 50_000
 VALID_DURATION_PRESETS = (
     "auto",
     "short",
@@ -133,7 +134,7 @@ def normalize_clip_brief(raw: Any) -> str:
         raise ValueError("clip_brief must be a string")
     brief = " ".join(raw.split()).strip()
     if len(brief) > CLIP_BRIEF_MAX_CHARS:
-        raise ValueError(f"clip_brief must be at most {CLIP_BRIEF_MAX_CHARS} characters")
+        return brief[:CLIP_BRIEF_MAX_CHARS]
     return brief
 
 
