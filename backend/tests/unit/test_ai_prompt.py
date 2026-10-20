@@ -152,8 +152,8 @@ def test_transcript_span_helpers_repair_near_miss_durations():
     )
 
     assert _extract_transcript_text(spans, 10, 36) == "Short highlight Payoff"
-    # 14s < min 30 → expand to contiguous payoff ending at 36s
-    assert _choose_repaired_bounds(spans, 10, 24) == (10, 36)
+    # 14s < min 30 → (10,36)=26 still too short; expand back to include setup → (0,36)=36
+    assert _choose_repaired_bounds(spans, 10, 24) == (0, 36)
     # 80s is within auto max 120 → no trim needed
     assert _choose_repaired_bounds(spans, 0, 80) is None
 
