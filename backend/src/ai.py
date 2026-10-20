@@ -35,11 +35,12 @@ from .runtime_settings import apply_settings_to_process_env
 logger = logging.getLogger(__name__)
 
 # Defaults match the "auto" duration preset (used when prefs are omitted).
-IDEAL_CLIP_MIN_SECONDS = 25
-IDEAL_CLIP_MAX_SECONDS = 50
-MIN_ACCEPTED_CLIP_SECONDS = 20
-MAX_ACCEPTED_CLIP_SECONDS = 60
-TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v8-watch-hooks"
+# ideal_* is soft metadata only — not a hard generation target for auto.
+IDEAL_CLIP_MIN_SECONDS = 30
+IDEAL_CLIP_MAX_SECONDS = 90
+MIN_ACCEPTED_CLIP_SECONDS = 30
+MAX_ACCEPTED_CLIP_SECONDS = 120
+TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v9-adaptive-auto"
 TRANSCRIPT_ANALYSIS_MAX_ATTEMPTS = 3
 TRANSCRIPT_ANALYSIS_TIMEOUT_SECONDS = 600
 # Long transcripts are analysed in overlapping windows so every part of the
@@ -333,7 +334,7 @@ OUTPUT CONTRACT:
 - Each item in "most_relevant_segments" must include: "start_time", "end_time", "text", "relevance_score", "reasoning", "virality", and "hook_title".
 - Do not use "segment" as an output field. Use "text".
 - "virality" must include: "hook_score", "engagement_score", "value_score", "shareability_score", "total_score", "hook_type", and "virality_reasoning".
-- Default clip length is 20-60 seconds. Prefer 25-50 seconds unless the task prompt overrides the duration bounds.
+- Duration bounds come from the task prompt (min/max). Prefer continuous natural duration for each clip — do not aim for fixed 30/60/90-second targets.
 
 CORE OBJECTIVES:
 1. Identify segments that would be compelling on social media platforms
@@ -432,8 +433,8 @@ Identify 2-4 moments in each segment where B-roll footage could enhance the vide
 - Use simple, searchable keywords (e.g., "coffee shop", "laptop coding", "money stack")
 
 TIMING GUIDELINES:
-- Obey the min/max/ideal durations stated in each task prompt
-- Default when unspecified: target 25-50 seconds; accept 20-60
+- Obey the min/max durations stated in each task prompt; duration bounds come from the task
+- Prefer continuous natural duration per clip — no fixed 30/60/90-second targets
 - CRITICAL: start_time MUST be different from end_time
 - Focus on natural content boundaries rather than arbitrary time limits
 - Include enough context for the segment to be understandable
@@ -459,13 +460,13 @@ SCORING AND OUTPUT RULES:
 - When a user brief is provided in the task prompt, treat it as editorial priority for social/paid use while staying grounded
 
 SHORT-FORM RETENTION (WATCH + hook-writer) — apply to every segment, with or without a user brief:
-- W — Win the first ~3 seconds: the start of the span must open a real gap (curiosity, stakes, contrarian with receipts, emotional cold-open, or a specific concrete claim). Prefer spans whose opening lands the hook immediately — no warm-up intros.
-- Hook honesty: extract the hook from what the transcript actually delivers; reject bait that the clip cannot pay off (over-promise → mid-clip retention cliff).
+- W — Win the first ~3 seconds: the start of the span must open a real gap (curiosity, stakes, contrarian with receipts, emotional cold-open, or a specific concrete claim). Prefer spans whose opening lands the hook immediately — no warm-up intros. Reject clips whose first spoken seconds are throat-clearing, greetings, or soft setup.
+- Hook honesty: extract the hook from what the transcript actually delivers; reject bait that the clip cannot pay off (over-promise → mid-clip retention cliff). hook_score and virality_reasoning must cite the opening line that stops the scroll.
 - Specificity beats abstraction: a real number, named entity, or sharp claim scores higher than vague advice.
 - A — Arc with open loops: setup → tension → payoff inside the same contiguous span; resolve the loop before the cut; never end mid-thought when contiguous lines can complete it.
 - C — Cash the promise: the ending must close what the opening opened.
 - Retention pacing: prefer moments with idea/emotion shifts across the clip, not a single quotable line with dead air around it.
-- Watch-through over vanity: rank for un-skippable standalone retention (social + paid), not topic importance alone.
+- Watch-through over vanity: rank for un-skippable standalone retention (social + paid), not topic importance alone. Hard gate: if the opening cannot stop a scroll in ~3s, do not select the span.
 
 Find the number of compelling segments requested in the task that would work well as standalone clips. Prefer meeting the requested count with strong clips; do not pad with weak filler. Every selected segment must be accurate, self-contained, have proper time ranges, and score high on virality metrics."""
 
@@ -776,6 +777,20 @@ def build_transcript_analysis_prompt(
             "prefer specific claims over vague advice — for scroll-stopping social/paid use."
         )
 
+    if selection.duration_preset == "auto":
+        duration_guidance = f"""- Accepted duration range for this run: {min_s}-{max_s} seconds.
+- Continuous natural duration per clip: do not aim for fixed 30/60/90-second lengths.
+- Expand contiguous same-topic lines until the narrative arc or payoff closes.
+- Different clips may have different lengths within the accepted range.
+- Stop when the promised hook pays off — do not pad after the payoff.
+- The start must be a hook or pattern interrupt in the first ~3 seconds (WATCH).
+- hook_score and virality_reasoning must cite the opening line that wins the scroll-stop."""
+    else:
+        duration_guidance = f"""- Most selected clips should be {ideal_min}-{ideal_max} seconds.
+- Accepted duration range for this run: {min_s}-{max_s} seconds.
+- Only choose a clip near the minimum when it already contains a full setup and payoff.
+- If a strong moment is shorter than {ideal_min} seconds, first try expanding to nearby contiguous transcript lines that add useful context."""
+
     return f"""Analyze this video transcript and identify the most engaging segments for short-form content.
 {window_note}
 The transcript is formatted as one line per timestamped span, for example:
@@ -790,10 +805,7 @@ Follow this workflow:
 
 Selection target:
 - Choose {segment_target} segments total (aim to support a final budget near {budget} clips for the whole video).
-- Most selected clips should be {ideal_min}-{ideal_max} seconds.
-- Accepted duration range for this run: {min_s}-{max_s} seconds.
-- Only choose a clip near the minimum when it already contains a full setup and payoff.
-- If a strong moment is shorter than {ideal_min} seconds, first try expanding to nearby contiguous transcript lines that add useful context.
+{duration_guidance}
 - Skip weak standalone picks: intros, sponsor reads, CTAs, contextless quotes, repeated points, vague setup, and answer fragments that require prior context.
 - Before returning a segment, ask whether a viewer would understand and care without seeing the rest of the source video.
 - Do not start without a hook or end abruptly mid-idea when contiguous lines can complete the arc.
@@ -963,7 +975,8 @@ def _choose_repaired_bounds(
     current_duration = end_seconds - start_seconds
 
     if current_duration > max_s:
-        target_end = start_seconds + ideal_max
+        # Trim to start+max_s (hard cap), not ideal_max — ideal is soft metadata only.
+        target_end = start_seconds + max_s
         candidate_ends = [
             candidate
             for candidate in ends
@@ -988,11 +1001,13 @@ def _choose_repaired_bounds(
                     extra_context = (start_seconds - candidate_start) + (
                         candidate_end - end_seconds
                     )
+                    # Auto: do not pull toward mid-band via ideal_penalty.
                     ideal_penalty = 0
-                    if duration < ideal_min:
-                        ideal_penalty = ideal_min - duration
-                    elif duration > ideal_max:
-                        ideal_penalty = duration - ideal_max
+                    if selection.duration_preset != "auto":
+                        if duration < ideal_min:
+                            ideal_penalty = ideal_min - duration
+                        elif duration > ideal_max:
+                            ideal_penalty = duration - ideal_max
                     candidate_ranges.append(
                         (ideal_penalty * 1000 + extra_context, candidate_start, candidate_end)
                     )

@@ -22,12 +22,12 @@ VALID_MIN_CLIPS = (5, 10, 15, 20)
 # Longer formats leave more room between clips.
 DURATION_PRESETS: dict[str, dict[str, Any]] = {
     "auto": {
-        "label": "Auto (20-60s)",
-        "min_seconds": 20,
-        "max_seconds": 60,
-        "ideal_min": 25,
-        "ideal_max": 50,
-        "spacing": 1.1,
+        "label": "Auto (30s–2min)",
+        "min_seconds": 30,
+        "max_seconds": 120,
+        "ideal_min": 30,
+        "ideal_max": 90,
+        "spacing": 1.2,
         "suggest_min_clips": "auto",
     },
     "short": {

@@ -15,6 +15,12 @@ def test_parse_defaults_and_brief():
     assert prefs.duration_preset == "auto"
     assert prefs.min_clips is None
     assert prefs.brief == ""
+    assert prefs.min_seconds == 30
+    assert prefs.max_seconds == 120
+    assert prefs.ideal_min == 30
+    assert prefs.ideal_max == 90
+    assert prefs.spacing == 1.2
+    assert prefs.preset["label"] == "Auto (30s–2min)"
 
     prefs = parse_clip_selection_prefs(
         duration_preset="long",

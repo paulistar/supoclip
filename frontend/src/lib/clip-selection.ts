@@ -29,13 +29,13 @@ export type DurationPreset = {
 export const DURATION_PRESETS: DurationPreset[] = [
   {
     id: "auto",
-    label: "Auto (20-60s)",
-    hint: "Balanced short-form clips",
-    minSeconds: 20,
-    maxSeconds: 60,
-    idealMin: 25,
-    idealMax: 50,
-    spacing: 1.1,
+    label: "Auto (30s–2min)",
+    hint: "Natural duration per cut — each clip keeps its own continuous length",
+    minSeconds: 30,
+    maxSeconds: 120,
+    idealMin: 30,
+    idealMax: 90,
+    spacing: 1.2,
     suggestMinClips: "auto",
   },
   {
