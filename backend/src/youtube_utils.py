@@ -387,6 +387,7 @@ def _fetch_public_http_proxies(limit: int = 20) -> list[str]:
 def _iter_ytdlp_proxies(
     include_direct: bool = True,
     prefer_proxy: bool = False,
+    max_proxies: Optional[int] = None,
 ) -> list[Optional[str]]:
     """
     Candidate proxies for yt-dlp.
@@ -398,9 +399,18 @@ def _iter_ytdlp_proxies(
     Important: missing cache/env values must NOT insert a direct candidate.
     Older code called ``_add(None)`` for empty values, which put direct first
     under prefer_proxy and burned the metadata budget on YouTube bot-checks.
+
+    ``max_proxies`` stops public-list TCP probes once enough HTTP proxies are
+    queued (direct does not count). Metadata preflight should pass a small cap.
     """
     ordered: list[Optional[str]] = []
     seen: set[str] = set()
+
+    def _proxy_count() -> int:
+        return sum(1 for item in ordered if item is not None)
+
+    def _have_enough_proxies() -> bool:
+        return max_proxies is not None and _proxy_count() >= max_proxies
 
     def _add(proxy: Optional[str]) -> None:
         if proxy is None:
@@ -422,8 +432,14 @@ def _iter_ytdlp_proxies(
     else:
         _add(_read_cached_proxy(allow_stale_if_alive=True))
         _add(os.environ.get("YTDLP_PROXY"))
-    if os.environ.get("YTDLP_AUTO_PROXY", "true").lower() in {"1", "true", "yes"}:
+    if (
+        not _have_enough_proxies()
+        and os.environ.get("YTDLP_AUTO_PROXY", "true").lower()
+        in {"1", "true", "yes"}
+    ):
         for proxy in _fetch_public_http_proxies(limit=30):
+            if _have_enough_proxies():
+                break
             # Skip obvious corpses before burning yt-dlp retries on them.
             if _proxy_tcp_alive(proxy):
                 _add(proxy)
@@ -684,7 +700,6 @@ def _fetch_video_info_with_ytdlp(
         raise ValueError(f"Invalid YouTube URL: {url}")
 
     last_error: Optional[Exception] = None
-    started = time.monotonic()
     budget = (
         YTDLP_METADATA_DEADLINE_SECONDS
         if deadline_seconds is None
@@ -695,12 +710,20 @@ def _fetch_video_info_with_ytdlp(
     # does not burn the API timeout on a doomed direct attempt + dead proxies.
     # Keep direct as an extra last-resort slot outside the proxy cap so a
     # working cached proxy is never displaced by the direct candidate.
+    # Build the list before starting the extract budget — public-proxy TCP probes
+    # can take tens of seconds and must not starve yt-dlp attempts.
+    proxy_cap = max(1, YTDLP_METADATA_MAX_PROXIES)
     proxy_only = [
         proxy
-        for proxy in _iter_ytdlp_proxies(include_direct=False, prefer_proxy=True)
+        for proxy in _iter_ytdlp_proxies(
+            include_direct=False,
+            prefer_proxy=True,
+            max_proxies=proxy_cap,
+        )
         if proxy
-    ][: max(1, YTDLP_METADATA_MAX_PROXIES)]
+    ][:proxy_cap]
     proxy_candidates: List[Optional[str]] = list(proxy_only) + [None]
+    started = time.monotonic()
     # #region agent log
     _agent_debug_log(
         "B",

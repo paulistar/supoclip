@@ -588,7 +588,7 @@ def test_fetch_video_info_with_ytdlp_keeps_direct_outside_proxy_cap(monkeypatch)
     monkeypatch.setattr(
         yu,
         "_iter_ytdlp_proxies",
-        lambda include_direct=True, prefer_proxy=False: [
+        lambda include_direct=True, prefer_proxy=False, max_proxies=None: [
             "http://203.0.113.1:1",
             "http://203.0.113.2:2",
             "http://203.0.113.3:3",
@@ -628,6 +628,45 @@ def test_fetch_video_info_with_ytdlp_keeps_direct_outside_proxy_cap(monkeypatch)
         "http://203.0.113.2:2",
         None,
     ]
+
+
+def test_fetch_video_info_budget_starts_after_proxy_discovery(monkeypatch):
+    from src import youtube_utils as yu
+
+    monkeypatch.setattr(yu, "YTDLP_METADATA_MAX_PROXIES", 1)
+    monkeypatch.setattr(yu, "YTDLP_METADATA_DEADLINE_SECONDS", 5.0)
+
+    def slow_iter(include_direct=True, prefer_proxy=False, max_proxies=None):
+        time.sleep(0.4)
+        return ["http://203.0.113.9:9"]
+
+    monkeypatch.setattr(yu, "_iter_ytdlp_proxies", slow_iter)
+    monkeypatch.setattr(yu, "_build_info_options", lambda proxy=None: {"proxy": proxy})
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {
+                "id": "abcdefghijk",
+                "title": "ok",
+                "duration": 42,
+                "description": "",
+            }
+
+    monkeypatch.setattr(yu.yt_dlp, "YoutubeDL", FakeYDL)
+
+    result = yu._fetch_video_info_with_ytdlp(
+        "https://www.youtube.com/watch?v=abcdefghijk"
+    )
+    assert result["duration"] == 42
 
 
 def test_sanitize_youtube_url_strips_pasted_brief():
