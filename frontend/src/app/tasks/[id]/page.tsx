@@ -369,9 +369,10 @@ export default function TaskPage() {
       if (typeof data.progress === "number") setProgress(data.progress);
       if (typeof data.message === "string") setProgressMessage(data.message);
       if (typeof data.status === "string") {
+        const nextStatus = data.status;
         setTask((current) =>
-          current && current.status !== data.status
-            ? { ...current, status: data.status }
+          current && current.status !== nextStatus
+            ? { ...current, status: nextStatus }
             : current,
         );
       }
