@@ -1,3 +1,7 @@
+import os
+import time
+from pathlib import Path
+
 import pytest
 import requests
 
@@ -531,6 +535,99 @@ def test_proxy_tcp_alive_rejects_bad_host(monkeypatch):
     from src.youtube_utils import _proxy_tcp_alive
 
     assert _proxy_tcp_alive("http://127.0.0.1:1", timeout=0.2) is False
+
+
+def test_prefer_proxy_does_not_put_direct_first_when_cache_missing(monkeypatch):
+    from src import youtube_utils as yu
+
+    monkeypatch.setenv("YTDLP_AUTO_PROXY", "false")
+    monkeypatch.delenv("YTDLP_PROXY", raising=False)
+    monkeypatch.setattr(yu, "_read_cached_proxy", lambda **_kwargs: None)
+
+    candidates = yu._iter_ytdlp_proxies(include_direct=True, prefer_proxy=True)
+
+    assert candidates == [None]
+
+
+def test_prefer_proxy_puts_cached_before_direct(monkeypatch):
+    from src import youtube_utils as yu
+
+    monkeypatch.setenv("YTDLP_AUTO_PROXY", "false")
+    monkeypatch.delenv("YTDLP_PROXY", raising=False)
+    monkeypatch.setattr(
+        yu,
+        "_read_cached_proxy",
+        lambda **_kwargs: "http://203.0.113.10:8080",
+    )
+
+    candidates = yu._iter_ytdlp_proxies(include_direct=True, prefer_proxy=True)
+
+    assert candidates[0] == "http://203.0.113.10:8080"
+    assert candidates[-1] is None
+    assert None not in candidates[:-1]
+
+
+def test_read_cached_proxy_reuses_stale_entry_when_tcp_alive(tmp_path, monkeypatch):
+    from src import youtube_utils as yu
+
+    cache = tmp_path / ".ytdlp_proxy"
+    cache.write_text("http://203.0.113.55:8080\n", encoding="utf-8")
+    stale_mtime = time.time() - (yu._PROXY_CACHE_TTL_SECONDS + 60)
+    os.utime(cache, (stale_mtime, stale_mtime))
+    monkeypatch.setattr(yu, "_PROXY_CACHE_PATH", cache)
+    monkeypatch.setattr(yu, "_proxy_tcp_alive", lambda _proxy, timeout=3.0: True)
+
+    assert yu._read_cached_proxy() is None
+    assert yu._read_cached_proxy(allow_stale_if_alive=True) == "http://203.0.113.55:8080"
+
+
+def test_fetch_video_info_with_ytdlp_keeps_direct_outside_proxy_cap(monkeypatch):
+    from src import youtube_utils as yu
+
+    monkeypatch.setattr(yu, "YTDLP_METADATA_MAX_PROXIES", 2)
+    monkeypatch.setattr(
+        yu,
+        "_iter_ytdlp_proxies",
+        lambda include_direct=True, prefer_proxy=False: [
+            "http://203.0.113.1:1",
+            "http://203.0.113.2:2",
+            "http://203.0.113.3:3",
+            None,
+        ],
+    )
+    monkeypatch.setattr(
+        yu,
+        "_build_info_options",
+        lambda proxy=None: {"proxy": proxy},
+    )
+    monkeypatch.setattr(yu, "YTDLP_METADATA_DEADLINE_SECONDS", 30.0)
+
+    attempts: list[str | None] = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            attempts.append(self.opts.get("proxy"))
+            raise RuntimeError(f"fail via {self.opts.get('proxy')}")
+
+    monkeypatch.setattr(yu.yt_dlp, "YoutubeDL", FakeYDL)
+
+    with pytest.raises(RuntimeError):
+        yu._fetch_video_info_with_ytdlp("https://www.youtube.com/watch?v=abcdefghijk")
+
+    assert attempts == [
+        "http://203.0.113.1:1",
+        "http://203.0.113.2:2",
+        None,
+    ]
 
 
 def test_sanitize_youtube_url_strips_pasted_brief():

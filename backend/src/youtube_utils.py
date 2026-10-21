@@ -242,15 +242,28 @@ def _apply_proxy(
     return ydl_opts
 
 
-def _read_cached_proxy() -> Optional[str]:
+def _read_cached_proxy(*, allow_stale_if_alive: bool = False) -> Optional[str]:
+    """Return the last working proxy, optionally keeping a TCP-alive stale entry.
+
+    Hard TTL alone was dropping known-good Contabo egress proxies after 6h, which
+    forced preflight onto bot-blocked direct + random public proxies.
+    """
     try:
         if not _PROXY_CACHE_PATH.is_file():
             return None
-        age = time.time() - _PROXY_CACHE_PATH.stat().st_mtime
-        if age > _PROXY_CACHE_TTL_SECONDS:
-            return None
         value = _PROXY_CACHE_PATH.read_text(encoding="utf-8").strip()
-        return value or None
+        if not value:
+            return None
+        age = time.time() - _PROXY_CACHE_PATH.stat().st_mtime
+        if age <= _PROXY_CACHE_TTL_SECONDS:
+            return value
+        if allow_stale_if_alive and _proxy_tcp_alive(value):
+            logger.info(
+                "Reusing stale yt-dlp proxy cache (age=%.0fs, still reachable)",
+                age,
+            )
+            return value
+        return None
     except OSError:
         return None
 
@@ -379,16 +392,18 @@ def _iter_ytdlp_proxies(
     Candidate proxies for yt-dlp.
 
     Default order: direct → YTDLP_PROXY → cached → public list.
-    When prefer_proxy=True (downloads on bot-blocked hosts): cached →
+    When prefer_proxy=True (bot-blocked datacenter IPs): cached →
     YTDLP_PROXY → public → direct last.
+
+    Important: missing cache/env values must NOT insert a direct candidate.
+    Older code called ``_add(None)`` for empty values, which put direct first
+    under prefer_proxy and burned the metadata budget on YouTube bot-checks.
     """
     ordered: list[Optional[str]] = []
     seen: set[str] = set()
 
     def _add(proxy: Optional[str]) -> None:
         if proxy is None:
-            if include_direct and None not in ordered:
-                ordered.append(None)
             return
         normalized = proxy.strip()
         if not normalized or normalized in seen:
@@ -396,10 +411,17 @@ def _iter_ytdlp_proxies(
         seen.add(normalized)
         ordered.append(normalized)
 
-    if not prefer_proxy and include_direct:
-        _add(None)
-    _add(_read_cached_proxy() if prefer_proxy else os.environ.get("YTDLP_PROXY"))
-    _add(os.environ.get("YTDLP_PROXY") if prefer_proxy else _read_cached_proxy())
+    def _add_direct() -> None:
+        if include_direct and None not in ordered:
+            ordered.append(None)
+
+    if not prefer_proxy:
+        _add_direct()
+        _add(os.environ.get("YTDLP_PROXY"))
+        _add(_read_cached_proxy())
+    else:
+        _add(_read_cached_proxy(allow_stale_if_alive=True))
+        _add(os.environ.get("YTDLP_PROXY"))
     if os.environ.get("YTDLP_AUTO_PROXY", "true").lower() in {"1", "true", "yes"}:
         for proxy in _fetch_public_http_proxies(limit=30):
             # Skip obvious corpses before burning yt-dlp retries on them.
@@ -407,8 +429,8 @@ def _iter_ytdlp_proxies(
                 _add(proxy)
             else:
                 logger.debug("Skipping dead public proxy candidate %s", proxy)
-    if prefer_proxy and include_direct:
-        _add(None)
+    if prefer_proxy:
+        _add_direct()
     return ordered
 
 
@@ -671,9 +693,14 @@ def _fetch_video_info_with_ytdlp(
     # Cap public-proxy attempts so preflight stays within the API timeout budget.
     # Prefer proxy first on bot-blocked datacenter IPs so preflight
     # does not burn the API timeout on a doomed direct attempt + dead proxies.
-    proxy_candidates = _iter_ytdlp_proxies(
-        include_direct=True, prefer_proxy=True
-    )[: max(1, YTDLP_METADATA_MAX_PROXIES)]
+    # Keep direct as an extra last-resort slot outside the proxy cap so a
+    # working cached proxy is never displaced by the direct candidate.
+    proxy_only = [
+        proxy
+        for proxy in _iter_ytdlp_proxies(include_direct=False, prefer_proxy=True)
+        if proxy
+    ][: max(1, YTDLP_METADATA_MAX_PROXIES)]
+    proxy_candidates: List[Optional[str]] = list(proxy_only) + [None]
     # #region agent log
     _agent_debug_log(
         "B",
