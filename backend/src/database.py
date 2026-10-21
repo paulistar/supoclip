@@ -102,9 +102,19 @@ async def ensure_db_alive(db: AsyncSession) -> None:
     runs on pool checkout, so a connection closed by Postgres
     (``idle_in_transaction_session_timeout``) or the network stays attached
     until the next execute fails mid-job. Probe and replace before that.
+
+    A successful ping must not leave the session idle-in-transaction: autobegin
+    would otherwise start a txn that Postgres kills during the next ffmpeg wave.
     """
-    try:
+    async def _ping_and_release() -> None:
         await db.execute(text("SELECT 1"))
+        # Match edit_transaction._EDIT_TASK without importing repositories
+        # (database sits below that layer).
+        if not db.info.get("supoclip_edit_task"):
+            await db.commit()
+
+    try:
+        await _ping_and_release()
         return
     except (InterfaceError, OperationalError, DBAPIError, OSError) as exc:
         logger.warning(
@@ -131,7 +141,7 @@ async def ensure_db_alive(db: AsyncSession) -> None:
         except Exception:
             pass
 
-    await db.execute(text("SELECT 1"))
+    await _ping_and_release()
 
 
 # Dependency to get database session

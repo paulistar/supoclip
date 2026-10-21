@@ -66,7 +66,11 @@ def build_task_service() -> TaskService:
     config.aws_access_key_id = "AKIATEST"
     config.aws_secret_access_key = "secret-test"
     config.ses_from_email = "SupoClip <noreply@example.com>"
-    service = TaskService(db=AsyncMock(), config=config)
+    db = AsyncMock()
+    db.info = {}
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    service = TaskService(db=db, config=config)
     service._processing_transaction = lambda _task_id: nullcontext()
     service._task_run_guard = lambda _task_id: nullcontext()
     service.task_repo.get_task_by_id = AsyncMock(return_value={"status": "queued"})
@@ -693,8 +697,9 @@ async def test_render_wave_commits_after_clip_ready_lookup(monkeypatch):
     service.db.commit = AsyncMock()
     service.db.info = {}
     ensure = AsyncMock()
+    pre_wave_commit = AsyncMock()
     monkeypatch.setattr(task_service_module, "ensure_db_alive", ensure)
-    monkeypatch.setattr(task_service_module, "commit_unless_editing", AsyncMock())
+    monkeypatch.setattr(task_service_module, "commit_unless_editing", pre_wave_commit)
 
     clip_ready = AsyncMock()
     progress = AsyncMock()
@@ -737,9 +742,64 @@ async def test_render_wave_commits_after_clip_ready_lookup(monkeypatch):
 
     assert ids == ["clip-1"]
     assert progress_calls["n"] == 2
-    ensure.assert_awaited()
-    task_service_module.commit_unless_editing.assert_awaited()
+    # Probe before every write + again on closed-connection retry.
+    assert ensure.await_count >= 2
+    # Release before the ffmpeg wave AND after clip_ready SELECT.
+    assert pre_wave_commit.await_count >= 2
     clip_ready.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_render_releases_session_before_each_ffmpeg_wave(monkeypatch):
+    """Two sequential waves must commit/release before each gather, not only after."""
+    service = build_task_service()
+    service.config.clip_render_concurrency = 1
+    service.clip_repo.get_clip_by_id = AsyncMock(
+        side_effect=[{"id": "clip-1"}, {"id": "clip-2"}]
+    )
+    service.clip_repo.create_clip = AsyncMock(side_effect=["clip-1", "clip-2"])
+    service.db.info = {}
+    monkeypatch.setattr(task_service_module, "ensure_db_alive", AsyncMock())
+    commit = AsyncMock()
+    monkeypatch.setattr(task_service_module, "commit_unless_editing", commit)
+
+    render_order = []
+
+    async def fake_create(*_args, **_kwargs):
+        render_order.append(commit.await_count)
+        return build_clip_result()
+
+    service.video_service.create_single_clip = AsyncMock(side_effect=fake_create)
+
+    ids = await service._render_segments_concurrent(
+        task_id="task-1",
+        segments=[
+            {"start_time": "00:01", "end_time": "00:10"},
+            {"start_time": "00:20", "end_time": "00:30"},
+        ],
+        video_path=Path("/tmp/source.mp4"),
+        clips_output_dir=Path("/tmp/clips"),
+        font_family=None,
+        font_size=None,
+        font_color=None,
+        caption_template="default",
+        output_format="vertical",
+        add_subtitles=False,
+        cleanup_settings={},
+        base_order=0,
+        existing_clip_ids=[],
+        progress_base=30,
+        progress_span=60,
+        check_cancelled=AsyncMock(),
+        update_progress=AsyncMock(),
+        clip_ready_callback=AsyncMock(),
+        progress_label="Criando corte",
+    )
+
+    assert ids == ["clip-1", "clip-2"]
+    # Each wave commits before ffmpeg starts (counts observed inside create).
+    assert render_order == [1, 3]
+    assert commit.await_count >= 4
 
 
 @pytest.mark.asyncio

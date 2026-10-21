@@ -128,6 +128,9 @@ class TaskService(ClipEditingMixin):
 
         for wave_start in range(0, total, concurrency):
             await check_cancelled()
+            # Release any autobegin txn (e.g. prior SELECT) before multi-minute
+            # ffmpeg — idle_in_transaction_session_timeout is 5m in production.
+            await commit_unless_editing(self.db)
             wave = list(segments[wave_start : wave_start + concurrency])
             wave_indexes = list(range(wave_start, wave_start + len(wave)))
 
@@ -149,10 +152,6 @@ class TaskService(ClipEditingMixin):
             rendered = await asyncio.gather(
                 *[_render_one(i, seg) for i, seg in zip(wave_indexes, wave)]
             )
-            # Waves often run > idle_in_transaction_session_timeout (5m). A prior
-            # read-only lookup can leave the session mid-transaction idle, so
-            # Postgres closes the socket before we persist this wave.
-            await ensure_db_alive(self.db)
             # Persist in clip order so clip_order / SSE stay sequential.
             for local_i, clip_info in sorted(rendered, key=lambda item: item[0]):
                 await check_cancelled()
@@ -198,10 +197,17 @@ class TaskService(ClipEditingMixin):
                 clip_id, clip_ids = await self._db_after_render_gap(_persist_clip)
                 pending_clip_path = None
                 if clip_ready_callback:
-                    clip_record = await self.clip_repo.get_clip_by_id(self.db, clip_id)
-                    # End the autobegin transaction from this SELECT so the next
-                    # ffmpeg wave is not idle-in-transaction for 5+ minutes.
-                    await commit_unless_editing(self.db)
+
+                    async def _load_clip_ready():
+                        clip_record = await self.clip_repo.get_clip_by_id(
+                            self.db, clip_id
+                        )
+                        # End the autobegin transaction from this SELECT so the
+                        # next ffmpeg wave is not idle-in-transaction for 5+ min.
+                        await commit_unless_editing(self.db)
+                        return clip_record
+
+                    clip_record = await self._db_after_render_gap(_load_clip_ready)
                     if clip_record:
                         await clip_ready_callback(
                             base_order + local_i,
@@ -213,7 +219,8 @@ class TaskService(ClipEditingMixin):
         return clip_ids
 
     async def _db_after_render_gap(self, op, *args, **kwargs):
-        """Run a DB op, recovering once if the connection died during ffmpeg."""
+        """Run a DB op after a long await; probe first and retry once if closed."""
+        await ensure_db_alive(self.db)
         try:
             return await op(*args, **kwargs)
         except Exception as exc:
@@ -510,15 +517,24 @@ class TaskService(ClipEditingMixin):
             if started is False:
                 raise TaskCancelled()
 
-            # Progress callback wrapper
+            # Progress callback wrapper — download/analysis gaps can exceed the
+            # idle-in-transaction timeout if a prior SELECT left a txn open.
             async def update_progress(
                 progress: int, message: str, status: str = "processing"
             ):
                 await check_cancelled()
-                changed = await self.task_repo.update_task_status(
-                    self.db, task_id, status, progress=progress,
-                    progress_message=message, expected_statuses=["processing"],
-                )
+
+                async def _write_status():
+                    return await self.task_repo.update_task_status(
+                        self.db,
+                        task_id,
+                        status,
+                        progress=progress,
+                        progress_message=message,
+                        expected_statuses=["processing"],
+                    )
+
+                changed = await self._db_after_render_gap(_write_status)
                 if changed is False:
                     raise TaskCancelled()
                 if progress_callback:
@@ -533,7 +549,10 @@ class TaskService(ClipEditingMixin):
                 max_video_duration = self.config.max_youtube_video_duration_for_plan(
                     billing.get("plan"), billing.get("subscription_status")
                 )
+                await commit_unless_editing(self.db)
 
+            # Release before multi-minute download/STT/analysis pipeline.
+            await commit_unless_editing(self.db)
             pipeline_start = perf_counter()
             result = await self.video_service.process_video_complete(
                 url=url,
@@ -564,7 +583,8 @@ class TaskService(ClipEditingMixin):
             # Render clips incrementally: render, save, notify one at a time
             segments_to_render = result.get("segments_to_render", [])
             if not segments_to_render:
-                await self.cache_repo.upsert_cache(
+                await self._db_after_render_gap(
+                    self.cache_repo.upsert_cache,
                     self.db,
                     cache_key=cache_key,
                     source_url=url,
@@ -577,7 +597,8 @@ class TaskService(ClipEditingMixin):
                     "No usable clip segments were selected for this video."
                 )
 
-            await self.cache_repo.upsert_cache(
+            await self._db_after_render_gap(
+                self.cache_repo.upsert_cache,
                 self.db,
                 cache_key=cache_key,
                 source_url=url,
@@ -607,8 +628,11 @@ class TaskService(ClipEditingMixin):
                 for seg in excellent_pool
             )
             excellence_meta["eta_seconds_total"] = eta_total
-            await self.task_repo.save_source_metadata(
-                self.db, task_id, {**source_metadata, **excellence_meta}
+            await self._db_after_render_gap(
+                self.task_repo.save_source_metadata,
+                self.db,
+                task_id,
+                {**source_metadata, **excellence_meta},
             )
 
             # Fase 4: pause after analysis so the user picks what to render.
@@ -617,19 +641,24 @@ class TaskService(ClipEditingMixin):
                 review_message = (
                     f"{excellent_total} excelentes — revise e escolha quais gerar"
                 )
-                paused = await self.task_repo.update_task_status(
-                    self.db,
-                    task_id,
-                    "awaiting_review",
-                    progress=70,
-                    progress_message=review_message,
-                    expected_statuses=["processing"],
-                )
+
+                async def _pause_review():
+                    return await self.task_repo.update_task_status(
+                        self.db,
+                        task_id,
+                        "awaiting_review",
+                        progress=70,
+                        progress_message=review_message,
+                        expected_statuses=["processing"],
+                    )
+
+                paused = await self._db_after_render_gap(_pause_review)
                 if paused is False:
                     raise TaskCancelled()
                 if progress_callback:
                     await progress_callback(70, review_message, "awaiting_review")
-                await self.task_repo.update_task_runtime_metadata(
+                await self._db_after_render_gap(
+                    self.task_repo.update_task_runtime_metadata,
                     self.db,
                     task_id,
                     stage_timings_json=json.dumps(stage_timings),
@@ -696,21 +725,26 @@ class TaskService(ClipEditingMixin):
                 )
             else:
                 done_message = f"Pronto! {rendered_total} corte(s) excelente(s)"
-            completed = await self.task_repo.update_task_status(
-                self.db,
-                task_id,
-                "completed",
-                progress=100,
-                progress_message=done_message,
-                expected_statuses=["processing"],
-            )
+
+            async def _mark_completed():
+                return await self.task_repo.update_task_status(
+                    self.db,
+                    task_id,
+                    "completed",
+                    progress=100,
+                    progress_message=done_message,
+                    expected_statuses=["processing"],
+                )
+
+            completed = await self._db_after_render_gap(_mark_completed)
             if completed is False:
                 raise TaskCancelled()
 
             if progress_callback:
                 await progress_callback(100, done_message, "completed")
 
-            await self.task_repo.update_task_runtime_metadata(
+            await self._db_after_render_gap(
+                self.task_repo.update_task_runtime_metadata,
                 self.db,
                 task_id,
                 completed_at=datetime.utcnow(),
@@ -880,14 +914,18 @@ class TaskService(ClipEditingMixin):
             # Include queued: enqueue leaves the task queued until we claim it.
             # A prior bug raised TaskCancelled when the first progress update
             # rejected status=queued (render-selected failed in <100ms).
-            changed = await self.task_repo.update_task_status(
-                self.db,
-                task_id,
-                status,
-                progress=progress,
-                progress_message=message,
-                expected_statuses=["queued", "processing", "awaiting_review"],
-            )
+
+            async def _write_status():
+                return await self.task_repo.update_task_status(
+                    self.db,
+                    task_id,
+                    status,
+                    progress=progress,
+                    progress_message=message,
+                    expected_statuses=["queued", "processing", "awaiting_review"],
+                )
+
+            changed = await self._db_after_render_gap(_write_status)
             if changed is False:
                 raise TaskCancelled()
             if progress_callback:
@@ -971,14 +1009,17 @@ class TaskService(ClipEditingMixin):
 
         # Claim queued → processing BEFORE any progress helper that used to
         # reject queued and falsely cancel render-selected / generate-more.
-        started = await self.task_repo.update_task_status(
-            self.db,
-            task_id,
-            "processing",
-            progress=20,
-            progress_message=f"Gerando {len(to_render)} cortes…",
-            expected_statuses=["queued", "processing", "awaiting_review"],
-        )
+        async def _claim_processing():
+            return await self.task_repo.update_task_status(
+                self.db,
+                task_id,
+                "processing",
+                progress=20,
+                progress_message=f"Gerando {len(to_render)} cortes…",
+                expected_statuses=["queued", "processing", "awaiting_review"],
+            )
+
+        started = await self._db_after_render_gap(_claim_processing)
         if started is False:
             raise TaskCancelled()
         if progress_callback:
@@ -1001,6 +1042,8 @@ class TaskService(ClipEditingMixin):
         clips_output_dir.mkdir(parents=True, exist_ok=True)
 
         base_order = len(existing)
+        # SELECTs above (cache/clips) may still hold an autobegin txn.
+        await commit_unless_editing(self.db)
         clip_ids = await self._render_segments_concurrent(
             task_id=task_id,
             segments=to_render,
@@ -1027,7 +1070,8 @@ class TaskService(ClipEditingMixin):
         excellent_total = int(
             analysis.get("excellent_clip_count") or len(excellent)
         )
-        await self.task_repo.save_source_metadata(
+        await self._db_after_render_gap(
+            self.task_repo.save_source_metadata,
             self.db,
             task_id,
             {
@@ -1043,14 +1087,18 @@ class TaskService(ClipEditingMixin):
             if excellent_total > new_rendered
             else f"Pronto! {new_rendered} corte(s) excelente(s)"
         )
-        completed = await self.task_repo.update_task_status(
-            self.db,
-            task_id,
-            "completed",
-            progress=100,
-            progress_message=done_message,
-            expected_statuses=["processing", "awaiting_review"],
-        )
+
+        async def _mark_completed():
+            return await self.task_repo.update_task_status(
+                self.db,
+                task_id,
+                "completed",
+                progress=100,
+                progress_message=done_message,
+                expected_statuses=["processing", "awaiting_review"],
+            )
+
+        completed = await self._db_after_render_gap(_mark_completed)
         if completed is False:
             raise TaskCancelled()
         if progress_callback:
