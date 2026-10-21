@@ -21,7 +21,12 @@ from ..repositories.clip_repository import ClipRepository
 from ..repositories.cache_repository import CacheRepository
 from .video_service import VideoService
 from .clip_service import ClipEditingMixin
-from ..repositories.edit_transaction import serialized_task_edit, task_edit_transaction, TaskCancelled
+from ..repositories.edit_transaction import (
+    commit_unless_editing,
+    serialized_task_edit,
+    task_edit_transaction,
+    TaskCancelled,
+)
 from ..repositories.task_run_guard import exclusive_task_run, task_run_guard
 from .billing_service import BillingService
 from .task_completion_email_service import (
@@ -29,6 +34,7 @@ from .task_completion_email_service import (
     TaskCompletionRecipient,
 )
 from ..config import Config, get_config
+from ..database import ensure_db_alive
 from ..youtube_utils import cleanup_downloaded_files, extract_video_id
 from ..clip_cleanup import normalize_clip_cleanup_settings
 from ..ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
@@ -41,9 +47,24 @@ from ..clip_review import (
     segment_duration_seconds,
 )
 from ..clip_source_map import load_clip_caption_settings
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
 logger = logging.getLogger(__name__)
 PROCESSING_CACHE_VERSION = "20260319_grounded_segments_v1"
+
+
+def _is_closed_db_connection(exc: BaseException) -> bool:
+    """True when Postgres/asyncpg dropped the worker's checked-out connection."""
+    if isinstance(exc, (InterfaceError, OperationalError)):
+        return True
+    if isinstance(exc, DBAPIError) and getattr(exc, "connection_invalidated", False):
+        return True
+    message = str(exc).lower()
+    return (
+        "connection is closed" in message
+        or "underlying connection is closed" in message
+        or "connectiondoesnotexist" in message.replace(" ", "")
+    )
 
 
 class TaskService(ClipEditingMixin):
@@ -128,46 +149,59 @@ class TaskService(ClipEditingMixin):
             rendered = await asyncio.gather(
                 *[_render_one(i, seg) for i, seg in zip(wave_indexes, wave)]
             )
+            # Waves often run > idle_in_transaction_session_timeout (5m). A prior
+            # read-only lookup can leave the session mid-transaction idle, so
+            # Postgres closes the socket before we persist this wave.
+            await ensure_db_alive(self.db)
             # Persist in clip order so clip_order / SSE stay sequential.
             for local_i, clip_info in sorted(rendered, key=lambda item: item[0]):
                 await check_cancelled()
                 clip_progress = progress_base + (
                     int(((local_i + 1) / total) * progress_span) if total else progress_span
                 )
-                await update_progress(
+                await self._db_after_render_gap(
+                    update_progress,
                     clip_progress,
                     f"{progress_label} {local_i + 1}/{total}…",
                 )
                 if clip_info is None:
                     continue
                 pending_clip_path = Path(clip_info["path"])
-                async with self._processing_transaction(task_id):
-                    await check_cancelled()
-                    clip_id = await self.clip_repo.create_clip(
-                        self.db,
-                        task_id=task_id,
-                        filename=clip_info["filename"],
-                        file_path=clip_info["path"],
-                        start_time=clip_info["start_time"],
-                        end_time=clip_info["end_time"],
-                        duration=clip_info["duration"],
-                        text=clip_info.get("text", ""),
-                        relevance_score=clip_info.get("relevance_score", 0.0),
-                        reasoning=clip_info.get("reasoning", ""),
-                        clip_order=base_order + local_i + 1,
-                        virality_score=clip_info.get("virality_score", 0),
-                        hook_score=clip_info.get("hook_score", 0),
-                        engagement_score=clip_info.get("engagement_score", 0),
-                        value_score=clip_info.get("value_score", 0),
-                        shareability_score=clip_info.get("shareability_score", 0),
-                        hook_type=clip_info.get("hook_type"),
-                        hook_title=clip_info.get("hook_title"),
-                    )
-                    clip_ids = [*clip_ids, clip_id]
-                    await self.task_repo.update_task_clips(self.db, task_id, clip_ids)
+
+                async def _persist_clip():
+                    async with self._processing_transaction(task_id):
+                        await check_cancelled()
+                        new_id = await self.clip_repo.create_clip(
+                            self.db,
+                            task_id=task_id,
+                            filename=clip_info["filename"],
+                            file_path=clip_info["path"],
+                            start_time=clip_info["start_time"],
+                            end_time=clip_info["end_time"],
+                            duration=clip_info["duration"],
+                            text=clip_info.get("text", ""),
+                            relevance_score=clip_info.get("relevance_score", 0.0),
+                            reasoning=clip_info.get("reasoning", ""),
+                            clip_order=base_order + local_i + 1,
+                            virality_score=clip_info.get("virality_score", 0),
+                            hook_score=clip_info.get("hook_score", 0),
+                            engagement_score=clip_info.get("engagement_score", 0),
+                            value_score=clip_info.get("value_score", 0),
+                            shareability_score=clip_info.get("shareability_score", 0),
+                            hook_type=clip_info.get("hook_type"),
+                            hook_title=clip_info.get("hook_title"),
+                        )
+                        new_ids = [*clip_ids, new_id]
+                        await self.task_repo.update_task_clips(self.db, task_id, new_ids)
+                        return new_id, new_ids
+
+                clip_id, clip_ids = await self._db_after_render_gap(_persist_clip)
                 pending_clip_path = None
                 if clip_ready_callback:
                     clip_record = await self.clip_repo.get_clip_by_id(self.db, clip_id)
+                    # End the autobegin transaction from this SELECT so the next
+                    # ffmpeg wave is not idle-in-transaction for 5+ minutes.
+                    await commit_unless_editing(self.db)
                     if clip_record:
                         await clip_ready_callback(
                             base_order + local_i,
@@ -177,6 +211,20 @@ class TaskService(ClipEditingMixin):
 
         _ = pending_clip_path  # kept for parity with cancel cleanup paths
         return clip_ids
+
+    async def _db_after_render_gap(self, op, *args, **kwargs):
+        """Run a DB op, recovering once if the connection died during ffmpeg."""
+        try:
+            return await op(*args, **kwargs)
+        except Exception as exc:
+            if not _is_closed_db_connection(exc):
+                raise
+            logger.warning(
+                "DB connection closed after render gap; retrying once (%s)",
+                type(exc).__name__,
+            )
+            await ensure_db_alive(self.db)
+            return await op(*args, **kwargs)
 
     def _is_stale_queued_task(self, task: Dict[str, Any]) -> bool:
         """Detect queued tasks that have likely stalled due to worker issues."""

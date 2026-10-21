@@ -1,8 +1,10 @@
+import logging
 import os
 from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -10,6 +12,8 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -89,6 +93,45 @@ def get_session_maker() -> async_sessionmaker[AsyncSession]:
 
 def AsyncSessionLocal() -> AsyncSession:
     return get_session_maker()()
+
+
+async def ensure_db_alive(db: AsyncSession) -> None:
+    """Recover a long-lived worker session after multi-minute CPU gaps.
+
+    Workers keep one AsyncSession across ffmpeg waves. ``pool_pre_ping`` only
+    runs on pool checkout, so a connection closed by Postgres
+    (``idle_in_transaction_session_timeout``) or the network stays attached
+    until the next execute fails mid-job. Probe and replace before that.
+    """
+    try:
+        await db.execute(text("SELECT 1"))
+        return
+    except (InterfaceError, OperationalError, DBAPIError, OSError) as exc:
+        logger.warning(
+            "DB session unhealthy after idle gap (%s); recovering",
+            type(exc).__name__,
+        )
+    except Exception:
+        logger.warning("DB session unhealthy after idle gap; recovering", exc_info=True)
+
+    try:
+        await db.rollback()
+    except Exception:
+        logger.debug("Rollback during DB recovery failed", exc_info=True)
+
+    try:
+        # Drop the dead checked-out connection so the next use pool-checkouts
+        # a fresh one (pool_pre_ping will validate it).
+        conn = await db.connection()
+        await conn.invalidate()
+    except Exception:
+        logger.debug("Connection invalidate during DB recovery failed", exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    await db.execute(text("SELECT 1"))
 
 
 # Dependency to get database session

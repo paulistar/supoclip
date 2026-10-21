@@ -679,6 +679,70 @@ async def test_legacy_queue_reservations_keep_full_arq_retention_window(age_hour
 
 
 @pytest.mark.asyncio
+async def test_render_wave_commits_after_clip_ready_lookup(monkeypatch):
+    """Regression: SELECT after persist left idle-in-transaction across ffmpeg waves.
+
+    Postgres idle_in_transaction_session_timeout (5m) then closed the connection
+    and the next progress UPDATE failed after clips 3/4 had already rendered.
+    """
+    from sqlalchemy.exc import InterfaceError
+
+    service = build_task_service()
+    service.config.clip_render_concurrency = 1
+    service.clip_repo.get_clip_by_id = AsyncMock(return_value={"id": "clip-1"})
+    service.db.commit = AsyncMock()
+    service.db.info = {}
+    ensure = AsyncMock()
+    monkeypatch.setattr(task_service_module, "ensure_db_alive", ensure)
+    monkeypatch.setattr(task_service_module, "commit_unless_editing", AsyncMock())
+
+    clip_ready = AsyncMock()
+    progress = AsyncMock()
+
+    # First progress write fails like a dead connection; retry must succeed.
+    closed = InterfaceError(
+        "UPDATE",
+        {},
+        Exception("the underlying connection is closed"),
+    )
+    progress_calls = {"n": 0}
+
+    async def flaky_progress(percent, message, status="processing"):
+        progress_calls["n"] += 1
+        if progress_calls["n"] == 1:
+            raise closed
+        await progress(percent, message, status)
+
+    ids = await service._render_segments_concurrent(
+        task_id="task-1",
+        segments=[{"start_time": "00:01", "end_time": "00:10"}],
+        video_path=Path("/tmp/source.mp4"),
+        clips_output_dir=Path("/tmp/clips"),
+        font_family=None,
+        font_size=None,
+        font_color=None,
+        caption_template="default",
+        output_format="vertical",
+        add_subtitles=False,
+        cleanup_settings={},
+        base_order=0,
+        existing_clip_ids=[],
+        progress_base=30,
+        progress_span=60,
+        check_cancelled=AsyncMock(),
+        update_progress=flaky_progress,
+        clip_ready_callback=clip_ready,
+        progress_label="Criando corte",
+    )
+
+    assert ids == ["clip-1"]
+    assert progress_calls["n"] == 2
+    ensure.assert_awaited()
+    task_service_module.commit_unless_editing.assert_awaited()
+    clip_ready.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_generate_more_claims_queued_before_progress_updates(tmp_path, monkeypatch):
     """Regression: render-selected used to TaskCancelled when still queued.
 
