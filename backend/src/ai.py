@@ -9,6 +9,7 @@ import logging
 import math
 import random
 import re
+import unicodedata
 
 import httpx
 from pydantic_ai import Agent, NativeOutput
@@ -1620,20 +1621,31 @@ def _validate_segments(
     return validated_segments
 
 
-_BRIEF_EXCLUSION_RE = re.compile(
+# Prefer strong skip markers so soft "não mirar 30/60/90" guidance is not treated
+# as a forbidden-topic list. Bare "não" only harvests quoted phrases.
+_BRIEF_STRONG_EXCLUSION_RE = re.compile(
     r"(?i)\b("
-    r"n[aã]o|nunca|evitar|evite|skip|forbid|forbidden|proibid[oa]s?|"
-    r"exclude|excluir|exclua|never|n[aã]o\s+selecione|n[aã]o\s+usar|"
-    r"n[aã]o\s+use|do\s+not|don't|dont"
+    r"evitar|evite|skip|forbid|forbidden|proibid[oa]s?|"
+    r"exclude|excluir|exclua|never|nunca|"
+    r"n[aã]o\s+selecione|n[aã]o\s+usar|n[aã]o\s+use|"
+    r"do\s+not|don't|dont"
     r")\b"
 )
+_BRIEF_WEAK_NAO_RE = re.compile(r"(?i)\bn[aã]o\b")
 _BRIEF_QUOTED_PHRASE_RE = re.compile(
     r"[\"“”'‘’«»]([^\"“”'‘’«»]{3,160})[\"“”'‘’«»]"
+)
+_BRIEF_LIST_LABEL_RE = re.compile(
+    r"(?i)^(t[oó]picos?|topics?|clips?|trechos?|[aâ]ngulos?|hooks?|ganchos?)"
+    r"(\s+j[aá]\s+editados?)?\s*:?\s*"
 )
 
 
 def _normalize_brief_match_text(value: str) -> str:
-    return re.sub(r"\s+", " ", (value or "")).strip().lower()
+    # Fold accents so "Não" in a title matches "Nao" in the brief.
+    decomposed = unicodedata.normalize("NFKD", value or "")
+    ascii_folded = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", ascii_folded).strip().lower()
 
 
 def _extract_forbidden_phrases(brief: str) -> List[str]:
@@ -1649,31 +1661,43 @@ def _extract_forbidden_phrases(brief: str) -> List[str]:
         normalized = normalized.strip(" .:;,-–—")
         if len(normalized) < 3 or normalized in seen:
             return
+        # Ignore tiny instructional leftovers.
+        if normalized in {"usar", "use", "select", "selecionar", "clips", "trechos"}:
+            return
         seen.add(normalized)
         phrases.append(normalized)
 
-    for line in str(brief).splitlines():
-        line = line.strip()
-        if not line or not _BRIEF_EXCLUSION_RE.search(line):
-            continue
-        quoted = _BRIEF_QUOTED_PHRASE_RE.findall(line)
+    def add_list_after_marker(text: str, match: re.Match[str]) -> None:
+        after = text[match.end() :]
+        after = re.sub(r"^[\s:–—\-•*]+", "", after).strip()
+        after = _BRIEF_LIST_LABEL_RE.sub("", after).strip()
+        quoted = _BRIEF_QUOTED_PHRASE_RE.findall(after) or _BRIEF_QUOTED_PHRASE_RE.findall(
+            text
+        )
         if quoted:
             for quote in quoted:
                 add_phrase(quote)
-            continue
-        remainder = _BRIEF_EXCLUSION_RE.sub(" ", line, count=1)
-        remainder = re.sub(r"^[\s:–—\-•*]+", "", remainder).strip()
-        remainder = re.sub(r"^(usar|use|selecionar|select|clips?|trechos?)\b[:\s-]*", "", remainder, flags=re.IGNORECASE)
-        if remainder:
-            add_phrase(remainder)
+        for part in re.split(r"[;\n•]+", after):
+            part = part.strip().strip(" .:;,-–—")
+            part = _BRIEF_LIST_LABEL_RE.sub("", part).strip()
+            if part:
+                add_phrase(part)
 
-    # Sentence-level pass catches "Never use '…'" mid-paragraph.
-    for sentence in re.split(r"[\n.;]+", str(brief)):
-        sentence = sentence.strip()
-        if not sentence or not _BRIEF_EXCLUSION_RE.search(sentence):
+    for line in str(brief).splitlines():
+        line = line.strip()
+        if not line:
             continue
-        for quote in _BRIEF_QUOTED_PHRASE_RE.findall(sentence):
-            add_phrase(quote)
+        strong = _BRIEF_STRONG_EXCLUSION_RE.search(line)
+        if strong:
+            add_list_after_marker(line, strong)
+            continue
+        if _BRIEF_WEAK_NAO_RE.search(line):
+            for quote in _BRIEF_QUOTED_PHRASE_RE.findall(line):
+                add_phrase(quote)
+
+    # Mid-paragraph "EVITAR tópicos: A; B" when brief is one long line.
+    for match in _BRIEF_STRONG_EXCLUSION_RE.finditer(str(brief)):
+        add_list_after_marker(str(brief), match)
 
     return phrases
 

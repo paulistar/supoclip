@@ -81,8 +81,25 @@ def test_extract_forbidden_phrases_from_exclusion_brief():
         "Skip intros and sponsor reads."
     )
     phrases = _extract_forbidden_phrases(brief)
-    assert "não adianta aumentar o balde" in phrases
+    assert "nao adianta aumentar o balde" in phrases
     assert any("intro" in p or "sponsor" in p for p in phrases)
+
+
+def test_extract_forbidden_phrases_splits_evitar_topic_list():
+    # Real MartClip brief shape from task a7b1a01b (semicolon list, no quotes).
+    brief = (
+        "Clips para redes sociais. Duracao natural continua 30s-2min "
+        "(nao mirar 30/60/90). Preferir angulos NOVOS. "
+        "EVITAR topicos ja editados: Nao adianta aumentar o balde; "
+        "Sua rotina e o adubo dos genes; Longevidade e qualidade de vida"
+    )
+    phrases = _extract_forbidden_phrases(brief)
+    assert "nao adianta aumentar o balde" in phrases
+    assert "sua rotina e o adubo dos genes" in phrases
+    assert "longevidade e qualidade de vida" in phrases
+    # Soft "nao mirar 30/60/90" must not become a forbidden phrase blob.
+    assert not any("30/60/90" in p for p in phrases)
+    assert not any(p.startswith("mirar") for p in phrases)
 
 
 def test_filter_segments_by_brief_drops_balde_and_refills():
@@ -107,7 +124,10 @@ def test_filter_segments_by_brief_drops_balde_and_refills():
         relevance_score=0.8,
         hook_title="Conversão sem balde",
     )
-    brief = 'Evitar: "Não adianta aumentar o balde"'
+    brief = (
+        "EVITAR topicos ja editados: Nao adianta aumentar o balde; "
+        "Outro topico antigo"
+    )
     assert _segment_violates_brief(forbidden, _extract_forbidden_phrases(brief))[0]
     assert not _segment_violates_brief(allowed, _extract_forbidden_phrases(brief))[0]
 
