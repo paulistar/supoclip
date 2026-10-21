@@ -10,11 +10,14 @@ from src.ai import (
     TranscriptSegment,
     _build_transcript_model,
     _choose_repaired_bounds,
+    _extract_forbidden_phrases,
     _extract_transcript_text,
+    _filter_segments_by_brief,
     _format_transcript_timestamp,
     _get_missing_llm_key_error,
     _parse_transcript_spans,
     _parse_transcript_timestamp_seconds,
+    _segment_violates_brief,
     build_transcript_analysis_prompt,
     transcript_analysis_system_prompt,
 )
@@ -56,10 +59,79 @@ def test_build_transcript_analysis_prompt_includes_watch_brief_guidance():
         transcript="[00:12 - 00:21] A strong opening line",
         prefs=ClipSelectionPrefs(brief="Prioritize curiosity hooks for paid traffic"),
     )
+    assert "HARD CONSTRAINTS" in prompt
+    assert "NEVER select" in prompt or "NEVER violate" in prompt
     assert "User brief" in prompt
     assert "Prioritize curiosity hooks for paid traffic" in prompt
     assert "cash the promise" in prompt
     assert "Win the first ~3s" in prompt or "win the first ~3s" in prompt
+    assert "editorial priority" not in prompt
+
+
+def test_system_prompt_treats_brief_as_hard_constraint():
+    assert "HARD constraint" in transcript_analysis_system_prompt
+    assert "NEVER select spans" in transcript_analysis_system_prompt
+    assert "editorial priority for social/paid use" not in transcript_analysis_system_prompt
+
+
+def test_extract_forbidden_phrases_from_exclusion_brief():
+    brief = (
+        "Prioritize curiosity hooks.\n"
+        'Nunca usar o gancho "Não adianta aumentar o balde".\n'
+        "Skip intros and sponsor reads."
+    )
+    phrases = _extract_forbidden_phrases(brief)
+    assert "não adianta aumentar o balde" in phrases
+    assert any("intro" in p or "sponsor" in p for p in phrases)
+
+
+def test_filter_segments_by_brief_drops_balde_and_refills():
+    forbidden = TranscriptSegment(
+        start_time="45:14",
+        end_time="47:12",
+        text="Não adianta aumentar o balde se a torneira está fechada.",
+        relevance_score=0.99,
+        hook_title="Não adianta aumentar o balde",
+    )
+    allowed = TranscriptSegment(
+        start_time="12:00",
+        end_time="13:10",
+        text="O funil certo começa pelo desejo do cliente.",
+        relevance_score=0.88,
+        hook_title="Comece pelo desejo",
+    )
+    filler = TranscriptSegment(
+        start_time="20:00",
+        end_time="21:05",
+        text="Outro momento permitido sobre conversão.",
+        relevance_score=0.8,
+        hook_title="Conversão sem balde",
+    )
+    brief = 'Evitar: "Não adianta aumentar o balde"'
+    assert _segment_violates_brief(forbidden, _extract_forbidden_phrases(brief))[0]
+    assert not _segment_violates_brief(allowed, _extract_forbidden_phrases(brief))[0]
+
+    kept = _filter_segments_by_brief(
+        [forbidden, allowed, filler],
+        brief,
+        clip_budget=2,
+    )
+    assert len(kept) == 2
+    assert kept[0].hook_title == "Comece pelo desejo"
+    assert kept[1].hook_title == "Conversão sem balde"
+    assert all(s.hook_title != "Não adianta aumentar o balde" for s in kept)
+
+
+def test_filter_segments_by_brief_empty_brief_is_noop():
+    segment = TranscriptSegment(
+        start_time="00:00",
+        end_time="00:40",
+        text="Não adianta aumentar o balde",
+        hook_title="Não adianta aumentar o balde",
+    )
+    kept = _filter_segments_by_brief([segment], "", clip_budget=1)
+    assert kept == [segment]
+    assert _extract_forbidden_phrases("") == []
 
 
 def test_build_transcript_analysis_prompt_auto_uses_adaptive_duration_language():

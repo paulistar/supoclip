@@ -68,7 +68,7 @@ EMOJI_FONT_NAME = "Noto Color Emoji"
 
 CLIP_END_SENTENCE_EXTENSION_SECONDS = 3.0
 
-CLIP_END_PADDING_SECONDS = 0.35
+CLIP_END_PADDING_SECONDS = 0.5
 
 CLIP_START_SNAP_WINDOW_SECONDS = 3.0
 
@@ -88,7 +88,8 @@ HOOK_TEASER_MIN_OFFSET_SECONDS = 3.0
 # CROSSFADE_MAX_SECONDS, which overlaps the two sides) about
 # PAUSE_RETAINED_SILENCE_SECONDS of silence remains audible. The padding is never
 # shorter than the crossfade, so the fade only ever blends silence, never words.
-PAUSE_RETAINED_SILENCE_SECONDS = 0.2
+# Tunable in the 0.3–0.8s range for less abrupt short-form cuts.
+PAUSE_RETAINED_SILENCE_SECONDS = 0.5
 
 CROSSFADE_MAX_SECONDS = 0.15
 
@@ -97,9 +98,9 @@ PAUSE_EDGE_PADDING_SECONDS = (PAUSE_RETAINED_SILENCE_SECONDS + CROSSFADE_MAX_SEC
 # Dead air kept before the first word and after the last word of a clip. The
 # tail is a little longer because word end timings often land before the final
 # consonant has decayed.
-PAUSE_LEAD_IN_SECONDS = 0.1
+PAUSE_LEAD_IN_SECONDS = 0.35
 
-PAUSE_TAIL_SECONDS = 0.25
+PAUSE_TAIL_SECONDS = 0.5
 
 SENTENCE_END_RE = re.compile(r"""[.!?]["')\]}]*$""")
 

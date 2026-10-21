@@ -40,7 +40,7 @@ IDEAL_CLIP_MIN_SECONDS = 30
 IDEAL_CLIP_MAX_SECONDS = 90
 MIN_ACCEPTED_CLIP_SECONDS = 30
 MAX_ACCEPTED_CLIP_SECONDS = 120
-TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v9-adaptive-auto"
+TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v10-hard-brief"
 TRANSCRIPT_ANALYSIS_MAX_ATTEMPTS = 3
 TRANSCRIPT_ANALYSIS_TIMEOUT_SECONDS = 600
 # Long transcripts are analysed in overlapping windows so every part of the
@@ -457,7 +457,7 @@ SCORING AND OUTPUT RULES:
 - Penalize clips that are only quotable but not self-contained, too generic, missing setup, missing payoff, or padded with filler
 - virality_reasoning and reasoning should cite what is actually present in the chosen span
 - summary and key_topics must also stay grounded in the transcript and should not add outside interpretation
-- When a user brief is provided in the task prompt, treat it as editorial priority for social/paid use while staying grounded
+- When a user brief is provided in the task prompt, treat it as a HARD constraint: NEVER select spans, titles, or hooks that violate forbidden topics/phrases in the brief; skip to the next allowed moment while staying grounded
 
 SHORT-FORM RETENTION (WATCH + hook-writer) — apply to every segment, with or without a user brief:
 - W — Win the first ~3 seconds: the start of the span must open a real gap (curiosity, stakes, contrarian with receipts, emotional cold-open, or a specific concrete claim). Prefer spans whose opening lands the hook immediately — no warm-up intros. Reject clips whose first spoken seconds are throat-clearing, greetings, or soft setup.
@@ -768,13 +768,16 @@ def build_transcript_analysis_prompt(
             else ""
         )
         brief_section = (
-            "\n\nUser brief (editorial priority for this generation — reinforce, do not invent)"
+            "\n\nHARD CONSTRAINTS — User brief (NEVER violate; do not invent)"
             f"{truncated_note}:\n"
             f"{selection.brief}\n\n"
-            "Apply this brief while staying fully grounded in the transcript. Reinforce WATCH "
-            "retention: win the first ~3s with an honest gap extracted from the content, cash "
-            "the promise by the end of the span, keep a complete arc (no mid-thought cut), and "
-            "prefer specific claims over vague advice — for scroll-stopping social/paid use."
+            "NEVER select any segment whose spoken text, hook_title, or hook violates this brief "
+            "(forbidden topics, skip lists, or phrases marked to avoid). If the strongest viral "
+            "moment violates the brief, skip it and choose the next allowed contiguous span. "
+            "Stay fully grounded in the transcript. Still reinforce WATCH retention on allowed "
+            "spans: win the first ~3s with an honest gap extracted from the content, cash the "
+            "promise by the end of the span, keep a complete arc (no mid-thought cut), and prefer "
+            "specific claims over vague advice — for scroll-stopping social/paid use."
         )
 
     if selection.duration_preset == "auto":
@@ -1617,6 +1620,123 @@ def _validate_segments(
     return validated_segments
 
 
+_BRIEF_EXCLUSION_RE = re.compile(
+    r"(?i)\b("
+    r"n[aã]o|nunca|evitar|evite|skip|forbid|forbidden|proibid[oa]s?|"
+    r"exclude|excluir|exclua|never|n[aã]o\s+selecione|n[aã]o\s+usar|"
+    r"n[aã]o\s+use|do\s+not|don't|dont"
+    r")\b"
+)
+_BRIEF_QUOTED_PHRASE_RE = re.compile(
+    r"[\"“”'‘’«»]([^\"“”'‘’«»]{3,160})[\"“”'‘’«»]"
+)
+
+
+def _normalize_brief_match_text(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "")).strip().lower()
+
+
+def _extract_forbidden_phrases(brief: str) -> List[str]:
+    """Pull explicit skip/forbidden phrases from a user brief for post-filters."""
+    if not brief or not str(brief).strip():
+        return []
+
+    phrases: List[str] = []
+    seen: set[str] = set()
+
+    def add_phrase(raw: str) -> None:
+        normalized = _normalize_brief_match_text(raw)
+        normalized = normalized.strip(" .:;,-–—")
+        if len(normalized) < 3 or normalized in seen:
+            return
+        seen.add(normalized)
+        phrases.append(normalized)
+
+    for line in str(brief).splitlines():
+        line = line.strip()
+        if not line or not _BRIEF_EXCLUSION_RE.search(line):
+            continue
+        quoted = _BRIEF_QUOTED_PHRASE_RE.findall(line)
+        if quoted:
+            for quote in quoted:
+                add_phrase(quote)
+            continue
+        remainder = _BRIEF_EXCLUSION_RE.sub(" ", line, count=1)
+        remainder = re.sub(r"^[\s:–—\-•*]+", "", remainder).strip()
+        remainder = re.sub(r"^(usar|use|selecionar|select|clips?|trechos?)\b[:\s-]*", "", remainder, flags=re.IGNORECASE)
+        if remainder:
+            add_phrase(remainder)
+
+    # Sentence-level pass catches "Never use '…'" mid-paragraph.
+    for sentence in re.split(r"[\n.;]+", str(brief)):
+        sentence = sentence.strip()
+        if not sentence or not _BRIEF_EXCLUSION_RE.search(sentence):
+            continue
+        for quote in _BRIEF_QUOTED_PHRASE_RE.findall(sentence):
+            add_phrase(quote)
+
+    return phrases
+
+
+def _segment_violates_brief(
+    segment: TranscriptSegment, phrases: List[str]
+) -> tuple[bool, Optional[str]]:
+    if not phrases:
+        return False, None
+    haystacks = [
+        _normalize_brief_match_text(segment.text),
+        _normalize_brief_match_text(segment.hook_title or ""),
+        _normalize_brief_match_text(segment.reasoning),
+    ]
+    for phrase in phrases:
+        for haystack in haystacks:
+            if phrase and phrase in haystack:
+                return True, phrase
+    return False, None
+
+
+def _filter_segments_by_brief(
+    candidates: List[TranscriptSegment],
+    brief: str,
+    clip_budget: int,
+) -> List[TranscriptSegment]:
+    """Drop brief-forbidden segments and refill from next-best allowed candidates."""
+    budget = max(0, int(clip_budget))
+    if budget <= 0:
+        return []
+    phrases = _extract_forbidden_phrases(brief)
+    if not phrases:
+        return candidates[:budget]
+
+    kept: List[TranscriptSegment] = []
+    dropped = 0
+    for segment in candidates:
+        violates, phrase = _segment_violates_brief(segment, phrases)
+        if violates:
+            dropped += 1
+            logger.info(
+                "Brief filter dropped segment %s-%s (phrase=%r, hook_title=%r)",
+                segment.start_time,
+                segment.end_time,
+                phrase,
+                segment.hook_title,
+            )
+            continue
+        kept.append(segment)
+        if len(kept) >= budget:
+            break
+
+    if dropped:
+        logger.info(
+            "Brief filter removed %s segment(s); kept %s of budget %s (phrases=%s)",
+            dropped,
+            len(kept),
+            budget,
+            phrases[:8],
+        )
+    return kept
+
+
 def _merge_key_topics(analyses: List[TranscriptAnalysis], limit: int = 12) -> List[str]:
     topics: List[str] = []
     seen: set[str] = set()
@@ -1708,7 +1828,11 @@ async def get_most_relevant_parts_by_transcript(
         if len(windows) > 1:
             candidates = await rerank_candidates(candidates)
 
-        validated_segments = candidates[:clip_budget]
+        validated_segments = _filter_segments_by_brief(
+            candidates,
+            selection.brief,
+            clip_budget,
+        )
 
         broll_opportunities = None
         if include_broll:

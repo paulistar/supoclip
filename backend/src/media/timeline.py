@@ -20,6 +20,7 @@ from .common import (
     HOOK_TEASER_MIN_SECONDS,
     PAUSE_EDGE_PADDING_SECONDS,
     PAUSE_LEAD_IN_SECONDS,
+    PAUSE_RETAINED_SILENCE_SECONDS,
     PAUSE_TAIL_SECONDS,
     SENTENCE_END_RE,
     SENTENCE_PAUSE_BOUNDARY_SECONDS,
@@ -670,7 +671,10 @@ def _build_cleanup_phrases(
     return normalized_phrases
 
 
-def _merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+def _merge_intervals(
+    intervals: List[Tuple[float, float]],
+    max_gap: float = 0.0,
+) -> List[Tuple[float, float]]:
     if not intervals:
         return []
 
@@ -678,7 +682,9 @@ def _merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, 
     for start, end in sorted(intervals):
         if end <= start:
             continue
-        if not merged or start > merged[-1][1]:
+        # Coalesce near-adjacent intervals so filler cuts + pause compress
+        # stay one removal (no micro silence island / zero-gap chatter).
+        if not merged or start > merged[-1][1] + max(0.0, max_gap):
             merged.append((start, end))
             continue
         merged[-1] = (merged[-1][0], max(merged[-1][1], end))
@@ -772,6 +778,17 @@ def build_clip_keep_ranges(
         def compress_pause(
             silence_start: float, silence_end: float, keep_before: float, keep_after: float
         ) -> None:
+            # Mid-junctions must keep a non-zero breath: never collapse adjacent
+            # speech into a zero-gap cut when the silence is long enough.
+            if keep_before > 0 and keep_after > 0:
+                total_keep = keep_before + keep_after
+                if (
+                    total_keep < PAUSE_RETAINED_SILENCE_SECONDS
+                    and (silence_end - silence_start) >= PAUSE_RETAINED_SILENCE_SECONDS
+                ):
+                    deficit = PAUSE_RETAINED_SILENCE_SECONDS - total_keep
+                    keep_before += deficit / 2.0
+                    keep_after += deficit / 2.0
             removal_start = silence_start + keep_before
             removal_end = silence_end - keep_after
             if removal_end - removal_start >= 0.05:
@@ -795,7 +812,10 @@ def build_clip_keep_ranges(
         if trailing_gap >= pause_threshold_seconds:
             compress_pause(spoken_words[-1]["end"], clip_end, PAUSE_TAIL_SECONDS, 0.0)
 
-    merged_removals = _merge_intervals(removal_intervals)
+    merged_removals = _merge_intervals(
+        removal_intervals,
+        max_gap=PAUSE_EDGE_PADDING_SECONDS,
+    )
     if not merged_removals:
         return [(clip_start, clip_end)]
 
