@@ -102,8 +102,9 @@ async def _preflight_youtube_source(url: str, duration_limit: int) -> Dict[str, 
             detail={
                 "code": "VIDEO_METADATA_UNAVAILABLE",
                 "message": (
-                    "We couldn't verify this video's length. Please try again shortly "
-                    "or upload the video file. No generation was used."
+                    "We couldn't verify this video's length (YouTube blocked or timed "
+                    "out metadata lookup from this server). Wait a minute and retry, "
+                    "or upload the video file instead. No generation was used."
                 ),
             },
         ) from None

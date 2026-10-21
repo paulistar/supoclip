@@ -191,7 +191,7 @@ YouTube metadata lookup is configurable independently from the download provider
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `YOUTUBE_METADATA_PROVIDER` | `yt_dlp` | Primary metadata provider: `yt_dlp` or `youtube_data_api` |
+| `YOUTUBE_METADATA_PROVIDER` | `innertube` | Primary metadata provider: `innertube`, `yt_dlp`, or `youtube_data_api`. Chain always tries InnerTube before flaky free proxies when possible. |
 | `YOUTUBE_DATA_API_KEY` | empty | Preferred credential for the YouTube Data API metadata path |
 
 Behavior notes:

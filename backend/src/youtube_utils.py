@@ -30,17 +30,27 @@ logger = logging.getLogger(__name__)
 
 YOUTUBE_METADATA_PROVIDER_YTDLP = "yt_dlp"
 YOUTUBE_METADATA_PROVIDER_DATA_API = "youtube_data_api"
+YOUTUBE_METADATA_PROVIDER_INNERTUBE = "innertube"
 YOUTUBE_DOWNLOAD_PROVIDER_YTDLP = "yt_dlp"
 YOUTUBE_DOWNLOAD_PROVIDER_APIFY = "apify"
 YOUTUBE_DATA_API_URL = "https://www.googleapis.com/youtube/v3/videos"
+# Public InnerTube web client key (same family yt-dlp uses for TVHTML5).
+# Used only for duration/title metadata — not for downloads.
+YOUTUBE_INNERTUBE_API_KEY = os.environ.get(
+    "YOUTUBE_INNERTUBE_API_KEY",
+    "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+)
+YOUTUBE_INNERTUBE_PLAYER_URL = (
+    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
+)
 # Preflight API wait_for is 90s; keep yt-dlp proxy loops under this so Data API
 # fallback (or a clean 503) can still run inside the request budget.
 YTDLP_METADATA_DEADLINE_SECONDS = float(
-    os.environ.get("YTDLP_METADATA_DEADLINE_SECONDS", "50")
+    os.environ.get("YTDLP_METADATA_DEADLINE_SECONDS", "35")
 )
-YTDLP_METADATA_MAX_PROXIES = int(os.environ.get("YTDLP_METADATA_MAX_PROXIES", "4"))
+YTDLP_METADATA_MAX_PROXIES = int(os.environ.get("YTDLP_METADATA_MAX_PROXIES", "3"))
 YTDLP_METADATA_PROXY_SOCKET_TIMEOUT = int(
-    os.environ.get("YTDLP_METADATA_PROXY_SOCKET_TIMEOUT", "8")
+    os.environ.get("YTDLP_METADATA_PROXY_SOCKET_TIMEOUT", "6")
 )
 
 
@@ -739,7 +749,8 @@ def _fetch_video_info_with_ytdlp(
     # #endregion
     for proxy in proxy_candidates:
         elapsed = time.monotonic() - started
-        if elapsed >= budget:
+        remaining = budget - elapsed
+        if remaining < 2.5:
             last_error = TimeoutError(
                 f"yt-dlp metadata budget exhausted after {elapsed:.1f}s for {video_id}"
             )
@@ -753,15 +764,13 @@ def _fetch_video_info_with_ytdlp(
             # #endregion
             break
         ydl_opts = _build_info_options(proxy=proxy)
-        remaining = max(3.0, budget - elapsed)
-        if proxy is not None:
-            ydl_opts["socket_timeout"] = min(
-                YTDLP_METADATA_PROXY_SOCKET_TIMEOUT, int(remaining)
-            )
-            ydl_opts["retries"] = 0
-        else:
-            ydl_opts["socket_timeout"] = min(20, int(remaining))
-            ydl_opts["retries"] = 0
+        # Hard-cap socket waits so a single dead proxy cannot overrun the budget
+        # (ConnectTimeout previously pushed elapsed to ~65s on a 50s budget).
+        socket_cap = max(2, min(YTDLP_METADATA_PROXY_SOCKET_TIMEOUT, int(remaining)))
+        if proxy is None:
+            socket_cap = max(2, min(12, int(remaining)))
+        ydl_opts["socket_timeout"] = socket_cap
+        ydl_opts["retries"] = 0
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -798,7 +807,10 @@ def _fetch_video_info_with_ytdlp(
             }
         except Exception as exc:
             last_error = exc
-            if proxy is None and not _is_youtube_bot_block_error(exc):
+            bot_blocked = _is_youtube_bot_block_error(exc)
+            if proxy and bot_blocked:
+                _invalidate_cached_proxy(proxy)
+            if proxy is None and not bot_blocked:
                 raise
             logger.warning(
                 "yt-dlp metadata failed for %s via %s: %s",
@@ -808,13 +820,13 @@ def _fetch_video_info_with_ytdlp(
             )
             # #region agent log
             _agent_debug_log(
-                "A" if _is_youtube_bot_block_error(exc) else "B",
+                "A" if bot_blocked else "B",
                 "youtube_utils.py:_fetch_video_info_with_ytdlp",
                 "ytdlp metadata attempt failed",
                 {
                     "videoId": video_id,
                     "via": proxy or "direct",
-                    "botBlock": _is_youtube_bot_block_error(exc),
+                    "botBlock": bot_blocked,
                     "errorType": type(exc).__name__,
                     "error": str(exc)[:220],
                 },
@@ -825,6 +837,153 @@ def _fetch_video_info_with_ytdlp(
     if last_error:
         raise last_error
     raise RuntimeError(f"yt-dlp metadata failed for {video_id}")
+
+
+def _invalidate_cached_proxy(proxy: str) -> None:
+    """Drop a cached proxy that just bot-blocked or otherwise failed metadata."""
+    try:
+        cached = _read_cached_proxy(allow_stale_if_alive=True)
+        if cached and cached.strip() == proxy.strip() and _PROXY_CACHE_PATH.is_file():
+            _PROXY_CACHE_PATH.unlink(missing_ok=True)
+            logger.info("Cleared yt-dlp proxy cache after metadata failure")
+    except OSError:
+        pass
+
+
+def _fetch_video_info_with_innertube(url: str) -> Dict[str, Any]:
+    """
+    Fetch duration/title via YouTube InnerTube player API.
+
+    Contabo / datacenter IPs are often bot-blocked for yt-dlp webpage extraction,
+    but TVHTML5_SIMPLY still returns videoDetails.lengthSeconds without cookies
+    or free proxies. This is the durable preflight path when Data API keys are
+    unset.
+    """
+    video_id = get_youtube_video_id(url)
+    if not video_id:
+        raise ValueError(f"Invalid YouTube URL: {url}")
+
+    clients = (
+        {
+            "clientName": "TVHTML5_SIMPLY",
+            "clientVersion": "1.0",
+            "user_agent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+        },
+        {
+            "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+            "clientVersion": "2.0",
+            "user_agent": "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+        },
+        {
+            "clientName": "WEB_EMBEDDED_PLAYER",
+            "clientVersion": "1.20240101.00.00",
+            "user_agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        },
+    )
+    last_error: Optional[Exception] = None
+    for client in clients:
+        payload = {
+            "context": {
+                "client": {
+                    "clientName": client["clientName"],
+                    "clientVersion": client["clientVersion"],
+                    "hl": "en",
+                    "gl": "US",
+                }
+            },
+            "videoId": video_id,
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+        }
+        try:
+            response = requests.post(
+                YOUTUBE_INNERTUBE_PLAYER_URL,
+                params={"key": YOUTUBE_INNERTUBE_API_KEY},
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": client["user_agent"],
+                    "Origin": "https://www.youtube.com",
+                    "Referer": f"https://www.youtube.com/watch?v={video_id}",
+                },
+                timeout=(5, 15),
+            )
+            response.raise_for_status()
+            data = response.json()
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "InnerTube metadata failed for %s via %s: %s",
+                video_id,
+                client["clientName"],
+                exc,
+            )
+            continue
+
+        details = data.get("videoDetails") or {}
+        length_raw = details.get("lengthSeconds")
+        try:
+            duration = int(length_raw) if length_raw is not None else 0
+        except (TypeError, ValueError):
+            duration = 0
+        if duration <= 0:
+            status = ((data.get("playabilityStatus") or {}).get("status")) or "unknown"
+            last_error = ValueError(
+                f"InnerTube {client['clientName']} returned no duration "
+                f"(status={status}) for {video_id}"
+            )
+            continue
+
+        micro = ((data.get("microformat") or {}).get("playerMicroformatRenderer")) or {}
+        thumbnails = ((details.get("thumbnail") or {}).get("thumbnails")) or []
+        thumbnail = None
+        if isinstance(thumbnails, list) and thumbnails:
+            thumbnail = (thumbnails[-1] or {}).get("url")
+        if not thumbnail:
+            thumbnail = _pick_best_thumbnail(
+                {
+                    "high": {
+                        "url": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+                    }
+                }
+            )
+
+        normalized = _empty_video_info(details.get("videoId") or video_id)
+        normalized.update(
+            {
+                "title": details.get("title"),
+                "description": details.get("shortDescription") or "",
+                "duration": duration,
+                "uploader": details.get("author"),
+                "upload_date": _normalize_upload_date(
+                    micro.get("publishDate") or micro.get("uploadDate")
+                ),
+                "view_count": _parse_optional_int(details.get("viewCount")),
+                "thumbnail": thumbnail,
+            }
+        )
+        # #region agent log
+        _agent_debug_log(
+            "H",
+            "youtube_utils.py:_fetch_video_info_with_innertube",
+            "innertube metadata success",
+            {
+                "videoId": video_id,
+                "client": client["clientName"],
+                "duration": duration,
+                "playability": (data.get("playabilityStatus") or {}).get("status"),
+            },
+        )
+        # #endregion
+        return normalized
+
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"InnerTube metadata failed for {video_id}")
 
 
 def _fetch_video_info_with_youtube_data_api(url: str) -> Dict[str, Any]:
@@ -896,29 +1055,48 @@ async def async_get_youtube_video_info(
 
 
 def _metadata_provider_chain(config) -> List[str]:
-    """Prefer Data API when a key exists so preflight does not depend on free proxies."""
+    """
+    Prefer paths that do not need flaky free proxies.
+
+    Order:
+    1. InnerTube player API (works from Contabo without cookies/proxies)
+    2. YouTube Data API when a key is configured
+    3. yt-dlp (direct + public proxies — last resort)
+    """
     has_data_api_key = bool(config.resolve_youtube_data_api_key())
     configured = config.youtube_metadata_provider
-    if has_data_api_key:
-        if configured == YOUTUBE_METADATA_PROVIDER_DATA_API:
-            return [
-                YOUTUBE_METADATA_PROVIDER_DATA_API,
-                YOUTUBE_METADATA_PROVIDER_YTDLP,
-            ]
-        # Key present: still try Data API first (fast + durable), then yt-dlp.
-        return [
+
+    if configured == YOUTUBE_METADATA_PROVIDER_INNERTUBE:
+        chain = [
+            YOUTUBE_METADATA_PROVIDER_INNERTUBE,
             YOUTUBE_METADATA_PROVIDER_DATA_API,
             YOUTUBE_METADATA_PROVIDER_YTDLP,
         ]
-    if configured == YOUTUBE_METADATA_PROVIDER_DATA_API:
-        return [
+    elif configured == YOUTUBE_METADATA_PROVIDER_DATA_API:
+        chain = [
+            YOUTUBE_METADATA_PROVIDER_DATA_API,
+            YOUTUBE_METADATA_PROVIDER_INNERTUBE,
+            YOUTUBE_METADATA_PROVIDER_YTDLP,
+        ]
+    elif has_data_api_key:
+        # Key present: Data API is official; keep InnerTube ahead of yt-dlp proxies.
+        chain = [
+            YOUTUBE_METADATA_PROVIDER_INNERTUBE,
             YOUTUBE_METADATA_PROVIDER_DATA_API,
             YOUTUBE_METADATA_PROVIDER_YTDLP,
         ]
-    return [
-        YOUTUBE_METADATA_PROVIDER_YTDLP,
-        YOUTUBE_METADATA_PROVIDER_DATA_API,
-    ]
+    else:
+        chain = [
+            YOUTUBE_METADATA_PROVIDER_INNERTUBE,
+            YOUTUBE_METADATA_PROVIDER_YTDLP,
+            YOUTUBE_METADATA_PROVIDER_DATA_API,
+        ]
+
+    # Skip Data API attempts when neither env/admin key is set so we do not
+    # burn a slot on a guaranteed "Missing …_API_KEY" failure.
+    if not has_data_api_key:
+        chain = [p for p in chain if p != YOUTUBE_METADATA_PROVIDER_DATA_API]
+    return chain
 
 
 def get_youtube_video_info(
@@ -980,7 +1158,9 @@ def get_youtube_video_info(
 
     for index, provider in enumerate(providers):
         try:
-            if provider == YOUTUBE_METADATA_PROVIDER_DATA_API:
+            if provider == YOUTUBE_METADATA_PROVIDER_INNERTUBE:
+                video_info = _fetch_video_info_with_innertube(url)
+            elif provider == YOUTUBE_METADATA_PROVIDER_DATA_API:
                 video_info = _fetch_video_info_with_youtube_data_api(url)
             else:
                 video_info = _fetch_video_info_with_ytdlp(url)

@@ -267,9 +267,9 @@ class Config:
 
     @staticmethod
     def _normalize_youtube_metadata_provider(value: str | None) -> str:
-        normalized = (value or "").strip().lower()
-        if normalized == "youtube_data_api":
-            return "youtube_data_api"
+        normalized = (value or "").strip().lower().replace("-", "_")
+        if normalized in {"youtube_data_api", "innertube"}:
+            return normalized
         return "yt_dlp"
 
     @staticmethod

@@ -11,7 +11,9 @@ from src.youtube_utils import (
     YOUTUBE_DOWNLOAD_PROVIDER_APIFY,
     YOUTUBE_DOWNLOAD_PROVIDER_YTDLP,
     YOUTUBE_METADATA_PROVIDER_DATA_API,
+    YOUTUBE_METADATA_PROVIDER_INNERTUBE,
     YOUTUBE_METADATA_PROVIDER_YTDLP,
+    _fetch_video_info_with_innertube,
     _fetch_video_info_with_youtube_data_api,
     _parse_iso8601_duration_to_seconds,
     _pick_best_thumbnail,
@@ -347,24 +349,30 @@ def test_fetch_video_info_with_youtube_data_api_falls_back_to_google_key(monkeyp
         set_config_override(None)
 
 
-def test_get_youtube_video_info_uses_ytdlp_by_default(monkeypatch):
+def test_get_youtube_video_info_uses_innertube_by_default(monkeypatch):
     config = Config()
     config.youtube_metadata_provider = YOUTUBE_METADATA_PROVIDER_YTDLP
+    config.youtube_data_api_key = None
+    config.google_api_key = None
 
     set_config_override(config)
     try:
         monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_innertube",
+            lambda _url: {"title": "From innertube", "duration": 12},
+        )
+        monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_ytdlp",
-            lambda _url: {"title": "From yt-dlp"},
+            lambda _url: (_ for _ in ()).throw(AssertionError("yt-dlp should not run")),
         )
         monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_youtube_data_api",
-            lambda _url: (_ for _ in ()).throw(AssertionError("fallback should not run")),
+            lambda _url: (_ for _ in ()).throw(AssertionError("data api should not run")),
         )
 
         result = get_youtube_video_info("https://www.youtube.com/watch?v=abcdefghijk")
 
-        assert result == {"title": "From yt-dlp"}
+        assert result == {"title": "From innertube", "duration": 12}
     finally:
         set_config_override(None)
 
@@ -372,12 +380,17 @@ def test_get_youtube_video_info_uses_ytdlp_by_default(monkeypatch):
 def test_get_youtube_video_info_uses_youtube_data_api_when_selected(monkeypatch):
     config = Config()
     config.youtube_metadata_provider = YOUTUBE_METADATA_PROVIDER_DATA_API
+    config.youtube_data_api_key = "youtube-key"
 
     set_config_override(config)
     try:
         monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_youtube_data_api",
-            lambda _url: {"title": "From API"},
+            lambda _url: {"title": "From API", "duration": 9},
+        )
+        monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_innertube",
+            lambda _url: (_ for _ in ()).throw(AssertionError("innertube should not run")),
         )
         monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_ytdlp",
@@ -386,51 +399,62 @@ def test_get_youtube_video_info_uses_youtube_data_api_when_selected(monkeypatch)
 
         result = get_youtube_video_info("https://www.youtube.com/watch?v=abcdefghijk")
 
-        assert result == {"title": "From API"}
+        assert result == {"title": "From API", "duration": 9}
     finally:
         set_config_override(None)
 
 
-def test_get_youtube_video_info_falls_back_to_ytdlp_on_data_api_failure(monkeypatch):
-    config = Config()
-    config.youtube_metadata_provider = YOUTUBE_METADATA_PROVIDER_DATA_API
-
-    set_config_override(config)
-    try:
-        monkeypatch.setattr(
-            "src.youtube_utils._fetch_video_info_with_youtube_data_api",
-            lambda _url: (_ for _ in ()).throw(ValueError("boom")),
-        )
-        monkeypatch.setattr(
-            "src.youtube_utils._fetch_video_info_with_ytdlp",
-            lambda _url: {"title": "Fallback yt-dlp"},
-        )
-
-        result = get_youtube_video_info("https://www.youtube.com/watch?v=abcdefghijk")
-
-        assert result == {"title": "Fallback yt-dlp"}
-    finally:
-        set_config_override(None)
-
-
-def test_get_youtube_video_info_falls_back_to_data_api_on_ytdlp_failure(monkeypatch):
+def test_get_youtube_video_info_falls_back_to_ytdlp_on_innertube_failure(monkeypatch):
     config = Config()
     config.youtube_metadata_provider = YOUTUBE_METADATA_PROVIDER_YTDLP
+    config.youtube_data_api_key = None
+    config.google_api_key = None
 
     set_config_override(config)
     try:
         monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_innertube",
+            lambda _url: (_ for _ in ()).throw(ValueError("innertube boom")),
+        )
+        monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_ytdlp",
-            lambda _url: (_ for _ in ()).throw(ValueError("boom")),
+            lambda _url: {"title": "Fallback yt-dlp", "duration": 20},
         )
         monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_youtube_data_api",
-            lambda _url: {"title": "Fallback API"},
+            lambda _url: (_ for _ in ()).throw(AssertionError("no data api key")),
         )
 
         result = get_youtube_video_info("https://www.youtube.com/watch?v=abcdefghijk")
 
-        assert result == {"title": "Fallback API"}
+        assert result == {"title": "Fallback yt-dlp", "duration": 20}
+    finally:
+        set_config_override(None)
+
+
+def test_get_youtube_video_info_falls_back_to_innertube_on_data_api_failure(monkeypatch):
+    config = Config()
+    config.youtube_metadata_provider = YOUTUBE_METADATA_PROVIDER_DATA_API
+    config.youtube_data_api_key = "youtube-key"
+
+    set_config_override(config)
+    try:
+        monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_youtube_data_api",
+            lambda _url: (_ for _ in ()).throw(ValueError("boom")),
+        )
+        monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_innertube",
+            lambda _url: {"title": "Fallback innertube", "duration": 33},
+        )
+        monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_ytdlp",
+            lambda _url: (_ for _ in ()).throw(AssertionError("yt-dlp should not run")),
+        )
+
+        result = get_youtube_video_info("https://www.youtube.com/watch?v=abcdefghijk")
+
+        assert result == {"title": "Fallback innertube", "duration": 33}
     finally:
         set_config_override(None)
 
@@ -447,13 +471,17 @@ def test_get_youtube_video_info_falls_back_when_data_api_returns_empty_items(mon
     try:
         monkeypatch.setattr("src.youtube_utils.requests.get", fake_get)
         monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_innertube",
+            lambda _url: {"title": "Fallback innertube", "duration": 11},
+        )
+        monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_ytdlp",
-            lambda _url: {"title": "Fallback yt-dlp"},
+            lambda _url: (_ for _ in ()).throw(AssertionError("yt-dlp should not run")),
         )
 
         result = get_youtube_video_info("https://www.youtube.com/watch?v=abcdefghijk")
 
-        assert result == {"title": "Fallback yt-dlp"}
+        assert result == {"title": "Fallback innertube", "duration": 11}
     finally:
         set_config_override(None)
 
@@ -470,18 +498,24 @@ def test_get_youtube_video_info_falls_back_when_data_api_http_errors(monkeypatch
     try:
         monkeypatch.setattr("src.youtube_utils.requests.get", fake_get)
         monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_innertube",
+            lambda _url: {"title": "Fallback innertube", "duration": 11},
+        )
+        monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_ytdlp",
-            lambda _url: {"title": "Fallback yt-dlp"},
+            lambda _url: (_ for _ in ()).throw(AssertionError("yt-dlp should not run")),
         )
 
         result = get_youtube_video_info("https://www.youtube.com/watch?v=abcdefghijk")
 
-        assert result == {"title": "Fallback yt-dlp"}
+        assert result == {"title": "Fallback innertube", "duration": 11}
     finally:
         set_config_override(None)
 
 
-def test_get_youtube_video_info_falls_back_to_ytdlp_when_no_data_api_key(monkeypatch):
+def test_get_youtube_video_info_falls_back_to_innertube_when_data_api_selected_without_key(
+    monkeypatch,
+):
     config = Config()
     config.youtube_metadata_provider = YOUTUBE_METADATA_PROVIDER_DATA_API
     config.youtube_data_api_key = None
@@ -490,15 +524,58 @@ def test_get_youtube_video_info_falls_back_to_ytdlp_when_no_data_api_key(monkeyp
     set_config_override(config)
     try:
         monkeypatch.setattr(
+            "src.youtube_utils._fetch_video_info_with_innertube",
+            lambda _url: {"title": "From innertube", "duration": 40},
+        )
+        monkeypatch.setattr(
             "src.youtube_utils._fetch_video_info_with_ytdlp",
-            lambda _url: {"title": "Fallback yt-dlp"},
+            lambda _url: (_ for _ in ()).throw(AssertionError("yt-dlp should not run")),
         )
 
         result = get_youtube_video_info("https://www.youtube.com/watch?v=abcdefghijk")
 
-        assert result == {"title": "Fallback yt-dlp"}
+        assert result == {"title": "From innertube", "duration": 40}
     finally:
         set_config_override(None)
+
+
+def test_fetch_video_info_with_innertube_parses_length(monkeypatch):
+    class FakePostResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "playabilityStatus": {"status": "UNPLAYABLE"},
+                "videoDetails": {
+                    "videoId": "abcdefghijk",
+                    "title": "Demo",
+                    "lengthSeconds": "3135",
+                    "author": "Channel",
+                    "viewCount": "8",
+                    "shortDescription": "",
+                    "thumbnail": {
+                        "thumbnails": [{"url": "https://example.com/thumb.jpg"}]
+                    },
+                },
+            }
+
+    monkeypatch.setattr(
+        "src.youtube_utils.requests.post",
+        lambda *args, **kwargs: FakePostResponse(),
+    )
+    result = _fetch_video_info_with_innertube(
+        "https://www.youtube.com/watch?v=abcdefghijk"
+    )
+    assert result["duration"] == 3135
+    assert result["title"] == "Demo"
+    assert result["id"] == "abcdefghijk"
+
+
+def test_config_youtube_metadata_provider_allows_innertube(monkeypatch):
+    monkeypatch.setenv("YOUTUBE_METADATA_PROVIDER", "innertube")
+    config = Config()
+    assert config.youtube_metadata_provider == YOUTUBE_METADATA_PROVIDER_INNERTUBE
 
 
 def test_cleanup_keeps_word_timings_for_cached_reprocessing(monkeypatch, tmp_path):
