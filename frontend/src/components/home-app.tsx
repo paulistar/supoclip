@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
 import {
   AlertCircle, ArrowRight, ArrowUp, Captions, CaptionsOff, Check, ChevronDown, Crop, FileVideo,
-  Loader2, Paintbrush, Paperclip, Timer, Upload, Wand2, Clapperboard, X, Youtube,
+  Gauge, Loader2, Paintbrush, Paperclip, Timer, Upload, Wand2, Clapperboard, X, Youtube,
 } from "lucide-react";
 import { CaptionSizeControl } from "@/components/caption-size-control";
 import { FONT_SEARCH_THRESHOLD, getYouTubeThumbnailUrl, uploadVideoFile } from "@/lib/video-upload";
@@ -33,6 +33,7 @@ import { fetchGenerations, greeting, type GenerationSummary } from "@/lib/genera
 import {
   DURATION_PRESETS,
   MIN_CLIPS_OPTIONS,
+  PROCESSING_MODE_OPTIONS,
   clampMinClipsChoice,
   formatCapacityHint,
   getDurationPreset,
@@ -42,6 +43,7 @@ import {
   saveStoredClipPrefs,
   type DurationPresetId,
   type MinClipsChoice,
+  type ProcessingModeId,
 } from "@/lib/clip-selection";
 import { cn } from "@/lib/utils";
 import { FontSelectOption, type FontOption } from "@/components/font-select-option";
@@ -105,6 +107,8 @@ export default function HomeApp() {
   const [clipDurationPreset, setClipDurationPreset] = useState<DurationPresetId>("auto");
   const [minClips, setMinClips] = useState<MinClipsChoice>("auto");
   const [clipBrief, setClipBrief] = useState("");
+  const [reviewBeforeRender, setReviewBeforeRender] = useState(false);
+  const [processingMode, setProcessingMode] = useState<ProcessingModeId>("fast");
   const [sourceSeconds, setSourceSeconds] = useState<number | null>(null);
   const [suggestedMinClips, setSuggestedMinClips] = useState<MinClipsChoice>("auto");
   const prefsHydratedRef = useRef(false);
@@ -170,11 +174,12 @@ export default function HomeApp() {
     setMinClips(stored.minClips);
     setSuggestedMinClips(getDurationPreset(stored.clipDurationPreset).suggestMinClips);
     setClipBrief(stored.clipBrief);
+    if (stored.processingMode) setProcessingMode(stored.processingMode);
   }, []);
 
   useEffect(() => {
-    saveStoredClipPrefs({ clipDurationPreset, minClips, clipBrief });
-  }, [clipDurationPreset, minClips, clipBrief]);
+    saveStoredClipPrefs({ clipDurationPreset, minClips, clipBrief, processingMode });
+  }, [clipDurationPreset, minClips, clipBrief, processingMode]);
 
   useEffect(() => {
     if (!file) {
@@ -282,7 +287,8 @@ export default function HomeApp() {
   const capacityHint = formatCapacityHint(sourceSeconds, clipDurationPreset);
   const effectiveMinClips = clampMinClipsChoice(minClips, sourceSeconds, clipDurationPreset);
   const durationChipLabel = getDurationPreset(clipDurationPreset).label;
-  const minClipsChipLabel = effectiveMinClips === "auto" ? "Cortes Auto" : `Mín. ${effectiveMinClips} cortes`;
+  const minClipsChipLabel =
+    effectiveMinClips === "auto" ? "Cortes por qualidade" : `Até ${effectiveMinClips}`;
   const normalizedBrief = normalizeClipBrief(clipBrief);
 
   const handleSubmit = async (e?: React.FormEvent) => {
@@ -325,7 +331,7 @@ export default function HomeApp() {
           source: { url: videoUrl, title: null },
           font_options: fontOptions,
           caption_template: captionTemplate,
-          processing_mode: "fast",
+          processing_mode: processingMode,
           output_format: outputFormat,
           add_subtitles: addSubtitles,
           cut_long_pauses: cutLongPauses,
@@ -334,6 +340,7 @@ export default function HomeApp() {
           filtered_words: normalizedFilteredWords,
           clip_duration_preset: clipDurationPreset,
           min_clips: effectiveMinClips,
+          review_before_render: reviewBeforeRender,
           ...(normalizedBrief ? { clip_brief: normalizedBrief } : {}),
         }),
       });
@@ -360,10 +367,11 @@ export default function HomeApp() {
         pause_threshold_ms: normalizedPauseThreshold,
         remove_filler_words: removeFillerWords,
         filtered_words: normalizedFilteredWords,
-        processing_mode: "fast",
+        processing_mode: processingMode,
         clip_duration_preset: clipDurationPreset,
         min_clips: effectiveMinClips,
         has_clip_brief: Boolean(normalizedBrief),
+        review_before_render: reviewBeforeRender,
       });
       window.location.href = `/tasks/${startResult.task_id}`;
     } catch (error) {
@@ -659,8 +667,8 @@ export default function HomeApp() {
                   </Chip>
                 </PopoverTrigger>
                 <PopoverContent align="start" className="w-[min(92vw,320px)] rounded-2xl p-3">
-                  <p className="mb-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">Quantidade mínima</p>
-                  <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Quantidade mínima de cortes">
+                  <p className="mb-2 px-1 text-xs font-medium uppercase tracking-wider text-muted-foreground">Quantidade</p>
+                  <div className="grid grid-cols-2 gap-2" role="radiogroup" aria-label="Teto de cortes a gerar">
                     {MIN_CLIPS_OPTIONS.map((option) => {
                       const clamped = clampMinClipsChoice(option, sourceSeconds, clipDurationPreset);
                       const disabled = option !== "auto" && option !== clamped;
@@ -677,12 +685,15 @@ export default function HomeApp() {
                             (effectiveMinClips === option || (minClips === option && effectiveMinClips === clamped)) && "border-foreground ring-1 ring-foreground",
                           )}
                         >
-                          {option === "auto" ? "Auto" : option}
+                          {option === "auto" ? "Por qualidade" : `Até ${option}`}
                         </button>
                       );
                     })}
                   </div>
-                  {capacityHint && <p className="mt-3 px-1 text-xs text-muted-foreground">{capacityHint}</p>}
+                  <p className="mt-3 px-1 text-xs text-muted-foreground">
+                    Gera só os excelentes; a quantidade vem do vídeo. Números são teto de render, não cota.
+                  </p>
+                  {capacityHint && <p className="mt-1 px-1 text-xs text-muted-foreground">{capacityHint}</p>}
                 </PopoverContent>
               </Popover>
 
@@ -690,6 +701,48 @@ export default function HomeApp() {
                 {addSubtitles ? <Captions className="size-3.5" /> : <CaptionsOff className="size-3.5" />}
                 {addSubtitles ? "Captions" : "No captions"}
               </Chip>
+
+              <Chip
+                onClick={() => setReviewBeforeRender((value) => !value)}
+                disabled={controlsDisabled}
+                aria-pressed={reviewBeforeRender}
+                active={reviewBeforeRender}
+              >
+                Revisar antes
+              </Chip>
+
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Chip disabled={controlsDisabled} active={processingMode !== "fast"}>
+                    <Gauge className="size-3.5" />
+                    {PROCESSING_MODE_OPTIONS.find((m) => m.id === processingMode)?.label ?? "Fast"}
+                    <ChevronDown className="size-3 opacity-60" />
+                  </Chip>
+                </PopoverTrigger>
+                <PopoverContent align="start" className="w-[min(92vw,320px)] space-y-2 rounded-2xl">
+                  <div>
+                    <p className="text-sm font-medium">Modo de processamento</p>
+                    <p className="text-xs text-muted-foreground">Afeta STT e teto de discovery — não a qualidade do gate.</p>
+                  </div>
+                  <div className="grid gap-1.5">
+                    {PROCESSING_MODE_OPTIONS.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        disabled={controlsDisabled}
+                        onClick={() => setProcessingMode(option.id)}
+                        className={cn(
+                          "rounded-xl border px-3 py-2 text-left text-sm transition-colors hover:bg-accent disabled:opacity-50",
+                          processingMode === option.id && "border-foreground ring-1 ring-foreground",
+                        )}
+                      >
+                        <span className="font-medium">{option.label}</span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">{option.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
 
               <Popover>
                 <PopoverTrigger asChild>

@@ -14,6 +14,18 @@ export type DurationPresetId =
 
 export type MinClipsChoice = "auto" | 5 | 10 | 15 | 20;
 
+export type ProcessingModeId = "fast" | "balanced" | "quality";
+
+export const PROCESSING_MODE_OPTIONS: Array<{
+  id: ProcessingModeId;
+  label: string;
+  hint: string;
+}> = [
+  { id: "fast", label: "Fast", hint: "STT rápido · teto de discovery mais baixo" },
+  { id: "balanced", label: "Balanced", hint: "STT rápido · teto completo de discovery" },
+  { id: "quality", label: "Quality", hint: "STT best · teto completo de discovery" },
+];
+
 export type DurationPreset = {
   id: DurationPresetId;
   label: string;
@@ -139,6 +151,7 @@ export type StoredClipPrefs = {
   clipDurationPreset: DurationPresetId;
   minClips: MinClipsChoice;
   clipBrief: string;
+  processingMode?: ProcessingModeId;
 };
 
 export function loadStoredClipPrefs(): StoredClipPrefs | null {
@@ -157,7 +170,10 @@ export function loadStoredClipPrefs(): StoredClipPrefs | null {
       typeof parsed.clipBrief === "string"
         ? parsed.clipBrief.slice(0, CLIP_BRIEF_SOFT_MAX)
         : "";
-    return { clipDurationPreset: preset, minClips, clipBrief };
+    const processingMode = PROCESSING_MODE_OPTIONS.some((item) => item.id === parsed.processingMode)
+      ? (parsed.processingMode as ProcessingModeId)
+      : "fast";
+    return { clipDurationPreset: preset, minClips, clipBrief, processingMode };
   } catch {
     return null;
   }

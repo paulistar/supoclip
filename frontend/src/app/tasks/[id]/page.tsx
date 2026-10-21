@@ -5,7 +5,7 @@ import { CaptionSizeControl } from "@/components/caption-size-control";
 import { useState, useEffect, useCallback } from "react";
 import { toast } from "sonner";
 import { useTaskProgress } from "@/hooks/use-task-progress";
-import { StatusBadge, ACTIVE_TASK_STATUSES } from "@/components/app/status-badge";
+import { StatusBadge, ACTIVE_TASK_STATUSES, REVIEWABLE_TASK_STATUSES } from "@/components/app/status-badge";
 import { getClipUrl, requestAction, downloadBlob, EXPORT_PRESETS } from "@/lib/clip-actions";
 import { trackClipExport } from "@/lib/clip-export-tracking";
 import { useParams, useRouter } from "next/navigation";
@@ -46,14 +46,23 @@ import {
   Link2Off,
   Loader2,
   PauseCircle,
+  RefreshCw,
   RotateCcw,
   Settings2,
   Share2,
+  Sparkles,
   Trash2,
   Upload,
   X,
   Youtube,
 } from "lucide-react";
+import {
+  DURATION_PRESETS,
+  MIN_CLIPS_OPTIONS,
+  type DurationPresetId,
+  type MinClipsChoice,
+} from "@/lib/clip-selection";
+import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import Link from "next/link";
 import { ClipTile, ClipFocus, ProcessingPanel, EmptyState } from "@/components/app/clip-wall";
@@ -105,7 +114,30 @@ interface TaskDetails {
   remove_filler_words?: boolean;
   filtered_words?: string[];
   share_enabled?: boolean;
+  clip_duration_preset?: DurationPresetId;
+  min_clips?: MinClipsChoice | "auto" | number;
+  clip_brief?: string;
+  excellent_clip_count?: number | null;
+  rendered_clip_count?: number | null;
+  remaining_excellent?: number | null;
+  drop_counts?: Record<string, number>;
+  review_before_render?: boolean;
+  eta_seconds_total?: number | null;
 }
+
+type ReviewCandidate = {
+  index: number;
+  start_time: string;
+  end_time: string;
+  duration_seconds: number;
+  hook_title: string | null;
+  text_preview: string;
+  virality_score: number;
+  hook_score: number;
+  rendered: boolean;
+  skipped: boolean;
+  eta_seconds: number;
+};
 
 export default function TaskPage() {
   const params = useParams();
@@ -137,6 +169,18 @@ export default function TaskPage() {
   const [projectFilteredWords, setProjectFilteredWords] = useState("");
   const [isApplyingSettings, setIsApplyingSettings] = useState(false);
   const [settingsSheetOpen, setSettingsSheetOpen] = useState(false);
+  const [opsSheetOpen, setOpsSheetOpen] = useState(false);
+  const [opsPreset, setOpsPreset] = useState<DurationPresetId>("auto");
+  const [opsMinClips, setOpsMinClips] = useState<MinClipsChoice>("auto");
+  const [opsBrief, setOpsBrief] = useState("");
+  const [generateMoreCount, setGenerateMoreCount] = useState<5 | 10 | 15>(5);
+  const [candidates, setCandidates] = useState<ReviewCandidate[]>([]);
+  const [selectedStarts, setSelectedStarts] = useState<Set<string>>(new Set());
+  const [candidatesMeta, setCandidatesMeta] = useState<{
+    pending_count: number;
+    eta_seconds_pending: number;
+    eta_seconds_top15: number;
+  } | null>(null);
   const [availableFonts, setAvailableFonts] = useState<FontOption[]>([]);
   const [deletingFontName, setDeletingFontName] = useState<string | null>(null);
   const [availableTemplates, setAvailableTemplates] = useState<
@@ -191,7 +235,14 @@ export default function TaskPage() {
         setProjectPauseThresholdMs(String(taskData.pause_threshold_ms || 700));
         setProjectRemoveFillerWords(Boolean(taskData.remove_filler_words));
         setProjectFilteredWords((taskData.filtered_words || []).join(", "));
-
+        setOpsPreset((taskData.clip_duration_preset as DurationPresetId) || "auto");
+        const minRaw = taskData.min_clips;
+        setOpsMinClips(
+          minRaw === "auto" || minRaw == null
+            ? "auto"
+            : ([5, 10, 15, 20].includes(Number(minRaw)) ? (Number(minRaw) as MinClipsChoice) : "auto"),
+        );
+        setOpsBrief(typeof taskData.clip_brief === "string" ? taskData.clip_brief : "");
         }
 
         // Fetch clips if task is completed or processing (incremental clips)
@@ -235,6 +286,29 @@ export default function TaskPage() {
     [buildSupportError, params.id, taskApiUrl],
   );
 
+  const fetchCandidates = useCallback(async () => {
+    if (!params.id) return;
+    try {
+      const response = await fetch(`${taskApiUrl}/${params.id}/candidates`, { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json();
+      const rows: ReviewCandidate[] = data.candidates || [];
+      setCandidates(rows);
+      setCandidatesMeta({
+        pending_count: data.pending_count ?? 0,
+        eta_seconds_pending: data.eta_seconds_pending ?? 0,
+        eta_seconds_top15: data.eta_seconds_top15 ?? 0,
+      });
+      setSelectedStarts((prev) => {
+        if (prev.size > 0) return prev;
+        const pending = rows.filter((r) => !r.rendered && !r.skipped).slice(0, 15);
+        return new Set(pending.map((r) => r.start_time));
+      });
+    } catch (err) {
+      console.error("Failed to load candidates:", err);
+    }
+  }, [params.id, taskApiUrl]);
+
   // Initial fetch - runs immediately, doesn't wait for session
   useEffect(() => {
     if (!params.id) return;
@@ -250,6 +324,12 @@ export default function TaskPage() {
 
     fetchTaskData();
   }, [params.id, fetchTaskStatus]);
+
+  useEffect(() => {
+    if (task && REVIEWABLE_TASK_STATUSES.includes(task.status)) {
+      void fetchCandidates();
+    }
+  }, [task?.status, task?.id, fetchCandidates]);
 
   useEffect(() => {
     const loadFonts = async () => {
@@ -288,6 +368,13 @@ export default function TaskPage() {
     onProgress: (data) => {
       if (typeof data.progress === "number") setProgress(data.progress);
       if (typeof data.message === "string") setProgressMessage(data.message);
+      if (typeof data.status === "string") {
+        setTask((current) =>
+          current && current.status !== data.status
+            ? { ...current, status: data.status }
+            : current,
+        );
+      }
     },
     onClip: (clip) => setClips((current) =>
       [...current.filter((item) => item.id !== clip.id), clip].sort((a, b) => a.clip_order - b.clip_order)),
@@ -548,6 +635,24 @@ export default function TaskPage() {
   if (error) return <PageError message={error} retry={() => void fetchTaskStatus()} />;
 
   const isActive = task?.status === "processing" || task?.status === "queued";
+  const canCancel = isActive || task?.status === "awaiting_review";
+  const showReview = Boolean(task && REVIEWABLE_TASK_STATUSES.includes(task.status) && candidates.length > 0);
+  const selectedEta = candidates
+    .filter((c) => selectedStarts.has(c.start_time) && !c.rendered && !c.skipped)
+    .reduce((sum, c) => sum + c.eta_seconds, 0);
+  const formatEta = (seconds: number) => {
+    if (seconds < 60) return `~${seconds}s`;
+    const mins = Math.round(seconds / 60);
+    return mins < 60 ? `~${mins} min` : `~${Math.round(mins / 60)} h`;
+  };
+  const toggleStart = (start: string) => {
+    setSelectedStarts((prev) => {
+      const next = new Set(prev);
+      if (next.has(start)) next.delete(start);
+      else next.add(start);
+      return next;
+    });
+  };
   const sortedClips = sortBy === "score"
     ? [...clips].sort((a, b) => (b.virality_score ?? 0) - (a.virality_score ?? 0) || a.clip_order - b.clip_order)
     : clips;
@@ -612,11 +717,16 @@ export default function TaskPage() {
                 </TooltipContent>
               </Tooltip>
               {clips.length > 0 && <span className="tabular-nums">{clips.length} {clips.length === 1 ? "clip" : "clips"} · {formatDuration(totalSeconds)} total</span>}
+              {typeof task.excellent_clip_count === "number" && task.excellent_clip_count > clips.length && (
+                <span className="tabular-nums text-foreground/80">
+                  {clips.length} de {task.excellent_clip_count} excelentes
+                </span>
+              )}
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
-            {isActive && (
+            {canCancel && (
               <Button size="sm" variant="outline" disabled={pendingAction !== null}
                 onClick={() => void runAction("cancel", async () => {
                   await requestAction(`${taskApiUrl}/${task.id}/cancel`, "POST");
@@ -641,6 +751,11 @@ export default function TaskPage() {
                   toast.success("Generation resumed");
                 })}>
                 <RotateCcw className="size-4" />Resume
+              </Button>
+            )}
+            {(task.status === "completed" || task.status === "awaiting_review") && (
+              <Button size="sm" variant="outline" onClick={() => setOpsSheetOpen(true)}>
+                <RefreshCw className="size-4" /><span className="hidden sm:inline">Ops</span>
               </Button>
             )}
             {task.status === "completed" && clips.length > 0 && (
@@ -701,6 +816,165 @@ export default function TaskPage() {
           <EmptyState tone="error" icon={<AlertCircle className="size-7" />} title="Processing Failed" body="There was an error processing your video. Resume to retry from where it stopped, or try another video.">
             <Button asChild variant="outline"><Link href="/"><ArrowLeft className="size-4" />Back to Home</Link></Button>
           </EmptyState>
+        ) : showReview && (task.status === "awaiting_review" || candidates.some((c) => !c.rendered && !c.skipped)) ? (
+          <div className="space-y-6">
+            <div className="rounded-2xl border bg-muted/30 p-4 sm:p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-semibold tracking-tight">Revisar cortes</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {candidatesMeta?.pending_count ?? 0} pendente(s)
+                    {candidatesMeta ? ` · ETA pendentes ${formatEta(candidatesMeta.eta_seconds_pending)}` : ""}
+                    {candidatesMeta ? ` · top 15 ${formatEta(candidatesMeta.eta_seconds_top15)}` : ""}
+                    {selectedStarts.size > 0 ? ` · seleção ${formatEta(selectedEta)}` : ""}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    disabled={pendingAction !== null || selectedStarts.size === 0}
+                    onClick={() => void runAction("render-selected", async () => {
+                      await requestAction(`${taskApiUrl}/${task.id}/render-selected`, "POST", {
+                        mode: "selected",
+                        start_times: Array.from(selectedStarts),
+                      });
+                      await fetchTaskStatus();
+                      toast.success(`Gerando ${selectedStarts.size} corte(s)`);
+                    })}
+                  >
+                    Gerar selecionados
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={pendingAction !== null}
+                    onClick={() => void runAction("render-top", async () => {
+                      await requestAction(`${taskApiUrl}/${task.id}/render-selected`, "POST", {
+                        mode: "top",
+                        count: 15,
+                      });
+                      await fetchTaskStatus();
+                      toast.success("Gerando top 15");
+                    })}
+                  >
+                    Top 15
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={pendingAction !== null}
+                    onClick={() => void runAction("render-all", async () => {
+                      await requestAction(`${taskApiUrl}/${task.id}/render-selected`, "POST", {
+                        mode: "all",
+                      });
+                      await fetchTaskStatus();
+                      toast.success("Gerando todos os pendentes");
+                    })}
+                  >
+                    Todos
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {candidates.map((c) => {
+                const disabled = c.rendered || c.skipped;
+                const checked = selectedStarts.has(c.start_time);
+                return (
+                  <label
+                    key={c.start_time}
+                    className={cn(
+                      "flex gap-3 rounded-xl border p-3 transition-colors",
+                      disabled ? "opacity-50" : "hover:bg-accent/40",
+                      checked && !disabled && "border-foreground/40 bg-accent/20",
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-1"
+                      disabled={disabled}
+                      checked={checked && !disabled}
+                      onChange={() => toggleStart(c.start_time)}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <span className="font-medium text-sm truncate">
+                          {c.hook_title || "Sem título"}
+                        </span>
+                        <span className="text-[11px] tabular-nums text-muted-foreground">
+                          {c.start_time}–{c.end_time} · {Math.round(c.duration_seconds)}s · score {c.virality_score} · ETA {formatEta(c.eta_seconds)}
+                        </span>
+                        {c.rendered && <span className="text-[10px] uppercase tracking-wide text-emerald-600">gerado</span>}
+                        {c.skipped && <span className="text-[10px] uppercase tracking-wide text-stone-500">skip</span>}
+                      </div>
+                      <p className="mt-1 text-xs text-muted-foreground line-clamp-2">{c.text_preview}</p>
+                    </div>
+                    {!c.rendered && !c.skipped && (
+                      <div className="flex shrink-0 flex-col gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="text-xs"
+                          disabled={pendingAction !== null}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            void runAction(`skip-${c.start_time}`, async () => {
+                              await requestAction(`${taskApiUrl}/${task.id}/skip-candidates`, "POST", {
+                                start_times: [c.start_time],
+                                permanent: false,
+                              });
+                              setSelectedStarts((prev) => {
+                                const next = new Set(prev);
+                                next.delete(c.start_time);
+                                return next;
+                              });
+                              await fetchCandidates();
+                              toast.success("Corte ignorado nesta geração");
+                            });
+                          }}
+                        >
+                          Skip
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="text-xs text-muted-foreground"
+                          disabled={pendingAction !== null}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            void runAction(`evitar-${c.start_time}`, async () => {
+                              await requestAction(`${taskApiUrl}/${task.id}/skip-candidates`, "POST", {
+                                start_times: [c.start_time],
+                                permanent: true,
+                              });
+                              setSelectedStarts((prev) => {
+                                const next = new Set(prev);
+                                next.delete(c.start_time);
+                                return next;
+                              });
+                              await fetchCandidates();
+                              toast.success("Skip permanente → EVITAR no brief");
+                            });
+                          }}
+                        >
+                          EVITAR
+                        </Button>
+                      </div>
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+
+            {clips.length > 0 && (
+              <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+                {sortedClips.map(renderTile)}
+              </div>
+            )}
+          </div>
         ) : clips.length === 0 ? (
           <EmptyState icon={<AlertCircle className="size-7" />} title="No Clips Generated" body="The generation completed but no clips were generated. The video may not have had suitable content for clipping.">
             <Button asChild><Link href="/"><ArrowLeft className="size-4" />Try Another Video</Link></Button>
@@ -747,6 +1021,172 @@ export default function TaskPage() {
         onDelete={() => { if (focusedClip) { setDeletingClipId(focusedClip.id); setFocusIndex(null); } }}
         hookTypeLabel={getHookTypeLabel}
       />
+
+      <Sheet open={opsSheetOpen} onOpenChange={setOpsSheetOpen}>
+        <SheetContent side="right" className="overflow-y-auto sm:max-w-md">
+          <SheetHeader>
+            <SheetTitle className="flex items-center gap-2"><RefreshCw className="size-4" />Ops do vídeo</SheetTitle>
+            <SheetDescription>
+              Mesmo vídeo, novo resultado — sem gambiarra. Reanalisar muda brief/preset; gerar mais completa os excelentes que faltam.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="space-y-5 px-4 pb-6">
+            {typeof task?.excellent_clip_count === "number" && (
+              <p className="rounded-lg border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                {clips.length} renderizado(s)
+                {task.excellent_clip_count > clips.length
+                  ? ` · ${task.excellent_clip_count - clips.length} excelente(s) ainda não gerado(s)`
+                  : " · todos os excelentes já gerados"}
+                {task.drop_counts && Object.keys(task.drop_counts).length > 0 && (
+                  <span className="mt-1 block">
+                    Drops: {Object.entries(task.drop_counts).map(([k, v]) => `${k} ${v}`).join(" · ")}
+                  </span>
+                )}
+              </p>
+            )}
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Duração</label>
+              <Select value={opsPreset} onValueChange={(v) => setOpsPreset(v as DurationPresetId)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {DURATION_PRESETS.map((preset) => (
+                    <SelectItem key={preset.id} value={preset.id}>{preset.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Teto de render</label>
+              <div className="grid grid-cols-3 gap-2">
+                {MIN_CLIPS_OPTIONS.map((option) => (
+                  <button
+                    key={String(option)}
+                    type="button"
+                    onClick={() => setOpsMinClips(option)}
+                    className={cn(
+                      "rounded-lg border px-2 py-1.5 text-xs font-medium",
+                      opsMinClips === option && "border-foreground ring-1 ring-foreground",
+                    )}
+                  >
+                    {option === "auto" ? "Qualidade" : `Até ${option}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Brief</label>
+              <Textarea
+                value={opsBrief}
+                onChange={(e) => setOpsBrief(e.target.value)}
+                rows={5}
+                placeholder="HARD NEVER / EVITAR… (opcional)"
+                className="text-sm"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Button
+                className="w-full"
+                disabled={pendingAction !== null}
+                onClick={() => void runAction("reanalyze-reuse", async () => {
+                  try {
+                    await requestAction(`${taskApiUrl}/${task!.id}/reanalyze`, "POST", {
+                      reuse_media: true,
+                      clip_duration_preset: opsPreset,
+                      min_clips: opsMinClips,
+                      clip_brief: opsBrief,
+                    });
+                  } catch (err) {
+                    const reason = err instanceof ApiRequestError ? upgradeReasonForError(err.code, err.detail, undefined) : null;
+                    if (!reason) throw err;
+                    setUpgradeReason(reason);
+                    return;
+                  }
+                  setOpsSheetOpen(false);
+                  await fetchTaskStatus();
+                  toast.success("Reanálise na fila (reuse STT/vídeo)");
+                })}
+              >
+                <RefreshCw className="size-4" />Reanalisar (reuse STT)
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full"
+                disabled={pendingAction !== null}
+                onClick={() => void runAction("reanalyze-scratch", async () => {
+                  try {
+                    await requestAction(`${taskApiUrl}/${task!.id}/reanalyze`, "POST", {
+                      reuse_media: false,
+                      clip_duration_preset: opsPreset,
+                      min_clips: opsMinClips,
+                      clip_brief: opsBrief,
+                    });
+                  } catch (err) {
+                    const reason = err instanceof ApiRequestError ? upgradeReasonForError(err.code, err.detail, undefined) : null;
+                    if (!reason) throw err;
+                    setUpgradeReason(reason);
+                    return;
+                  }
+                  setOpsSheetOpen(false);
+                  await fetchTaskStatus();
+                  toast.success("Reanálise do zero na fila");
+                })}
+              >
+                Do zero (novo STT)
+              </Button>
+            </div>
+
+            <div className="border-t pt-4 space-y-2">
+              <p className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                <Sparkles className="size-3.5" />Gerar mais excelentes
+              </p>
+              <div className="flex gap-2">
+                {([5, 10, 15] as const).map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setGenerateMoreCount(n)}
+                    className={cn(
+                      "flex-1 rounded-lg border px-2 py-1.5 text-xs font-medium",
+                      generateMoreCount === n && "border-foreground ring-1 ring-foreground",
+                    )}
+                  >
+                    +{n}
+                  </button>
+                ))}
+              </div>
+              <Button
+                variant="secondary"
+                className="w-full"
+                disabled={
+                  pendingAction !== null
+                  || (typeof task?.excellent_clip_count === "number" && task.excellent_clip_count <= clips.length)
+                }
+                onClick={() => void runAction("generate-more", async () => {
+                  try {
+                    await requestAction(`${taskApiUrl}/${task!.id}/generate-more`, "POST", {
+                      count: generateMoreCount,
+                    });
+                  } catch (err) {
+                    const reason = err instanceof ApiRequestError ? upgradeReasonForError(err.code, err.detail, undefined) : null;
+                    if (!reason) throw err;
+                    setUpgradeReason(reason);
+                    return;
+                  }
+                  setOpsSheetOpen(false);
+                  await fetchTaskStatus();
+                  toast.success(`Gerando mais até ${generateMoreCount} cortes`);
+                })}
+              >
+                Gerar mais {generateMoreCount}
+              </Button>
+            </div>
+          </div>
+        </SheetContent>
+      </Sheet>
 
       <Sheet open={settingsSheetOpen} onOpenChange={setSettingsSheetOpen}>
         <SheetContent side="right" className="overflow-y-auto sm:max-w-md">

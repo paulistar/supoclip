@@ -2,13 +2,24 @@
 Processing cache repository for reusable pipeline artifacts.
 """
 
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class CacheRepository:
+    @staticmethod
+    def _row_to_dict(row: Any) -> Dict[str, Any]:
+        return {
+            "cache_key": row.cache_key,
+            "source_url": row.source_url,
+            "source_type": row.source_type,
+            "video_path": row.video_path,
+            "transcript_text": row.transcript_text,
+            "analysis_json": row.analysis_json,
+        }
+
     @staticmethod
     async def get_cache(db: AsyncSession, cache_key: str) -> Optional[Dict[str, Any]]:
         result = await db.execute(
@@ -24,15 +35,47 @@ class CacheRepository:
         row = result.fetchone()
         if not row:
             return None
+        return CacheRepository._row_to_dict(row)
 
-        return {
-            "cache_key": row.cache_key,
-            "source_url": row.source_url,
-            "source_type": row.source_type,
-            "video_path": row.video_path,
-            "transcript_text": row.transcript_text,
-            "analysis_json": row.analysis_json,
-        }
+    @staticmethod
+    async def find_latest_by_source_url(
+        db: AsyncSession,
+        source_url: str,
+        source_type: str | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Find the newest cache row for a URL (prefs-agnostic transcript reuse)."""
+        if source_type:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT cache_key, source_url, source_type, video_path, transcript_text, analysis_json
+                    FROM processing_cache
+                    WHERE source_url = :source_url AND source_type = :source_type
+                      AND transcript_text IS NOT NULL AND transcript_text <> ''
+                    ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+                    LIMIT 1
+                    """
+                ),
+                {"source_url": source_url, "source_type": source_type},
+            )
+        else:
+            result = await db.execute(
+                text(
+                    """
+                    SELECT cache_key, source_url, source_type, video_path, transcript_text, analysis_json
+                    FROM processing_cache
+                    WHERE source_url = :source_url
+                      AND transcript_text IS NOT NULL AND transcript_text <> ''
+                    ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+                    LIMIT 1
+                    """
+                ),
+                {"source_url": source_url},
+            )
+        row = result.fetchone()
+        if not row:
+            return None
+        return CacheRepository._row_to_dict(row)
 
     @staticmethod
     async def upsert_cache(

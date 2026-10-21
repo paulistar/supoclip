@@ -361,6 +361,10 @@ async def supoclip_create_clip_task(
     font_color: str = "",
     cut_long_pauses: bool = True,
     remove_filler_words: bool = True,
+    clip_duration_preset: str = "auto",
+    min_clips: str = "auto",
+    clip_brief: str = "",
+    review_before_render: bool = False,
 ) -> str:
     """Create a SupoClip task that downloads a video and generates viral short clips.
 
@@ -382,6 +386,11 @@ async def supoclip_create_clip_task(
         font_family / font_size / font_color: Optional subtitle styling overrides.
         cut_long_pauses: Shorten long silences to a natural breath (default on).
         remove_filler_words: Cut disfluencies like "um" and "uh" (default on).
+        clip_duration_preset: Duration preset id
+            ('auto' | 'short' | 'long' | 'viral' | 'monetization' | 'podcast').
+        min_clips: Render ceiling — 'auto' (quality gate) or '5'|'10'|'15'|'20'.
+        clip_brief: Optional brief / HARD NEVER / EVITAR constraints for selection.
+        review_before_render: Pause after analysis so the user picks which clips to render.
 
     Returns:
         str: JSON ``{"task_id": str, "job_id": str, "message": str}`` on success.
@@ -392,6 +401,19 @@ async def supoclip_create_clip_task(
 
     normalized_mode = processing_mode if processing_mode in {"fast", "balanced", "quality"} else "fast"
     normalized_format = output_format if output_format in VALID_OUTPUT_FORMATS else "vertical"
+    duration_presets = {"auto", "short", "long", "viral", "monetization", "podcast"}
+    normalized_preset = (
+        clip_duration_preset.strip().lower()
+        if (clip_duration_preset or "").strip().lower() in duration_presets
+        else "auto"
+    )
+    raw_min = (min_clips or "auto").strip().lower()
+    if raw_min == "auto":
+        normalized_min: str | int = "auto"
+    elif raw_min in {"5", "10", "15", "20"}:
+        normalized_min = int(raw_min)
+    else:
+        raise SupoClipError("min_clips must be auto, 5, 10, 15, or 20.")
 
     source: dict = {"url": cleaned_url[:2000]}
     cleaned_title = title.strip()
@@ -405,7 +427,13 @@ async def supoclip_create_clip_task(
         "add_subtitles": add_subtitles,
         "caption_template": (caption_template or "default").strip()[:50] or "default",
         "include_broll": include_broll,
+        "clip_duration_preset": normalized_preset,
+        "min_clips": normalized_min,
+        "review_before_render": bool(review_before_render),
     }
+    cleaned_brief = " ".join((clip_brief or "").split()).strip()
+    if cleaned_brief:
+        body["clip_brief"] = cleaned_brief[:50_000]
 
     font_options: dict = {}
     cleaned_font_family = font_family.strip()

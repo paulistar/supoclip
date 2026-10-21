@@ -3,7 +3,8 @@ Task service - orchestrates task creation and processing workflow.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, Mapping, Sequence
+import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,13 @@ from ..youtube_utils import cleanup_downloaded_files, extract_video_id
 from ..clip_cleanup import normalize_clip_cleanup_settings
 from ..ai import TRANSCRIPT_ANALYSIS_CACHE_VERSION
 from ..clip_selection import ClipSelectionPrefs, parse_clip_selection_prefs
+from ..clip_review import (
+    append_evitar_phrases,
+    build_candidate_rows,
+    estimate_render_seconds,
+    select_candidates_for_render,
+    segment_duration_seconds,
+)
 from ..clip_source_map import load_clip_caption_settings
 
 logger = logging.getLogger(__name__)
@@ -60,9 +68,115 @@ class TaskService(ClipEditingMixin):
         selection = prefs or ClipSelectionPrefs()
         payload = (
             f"{source_type}|{processing_mode}|"
-            f"{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|{selection.cache_token()}|{url.strip()}"
+            f"{PROCESSING_CACHE_VERSION}|{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|"
+            f"{selection.cache_token()}|{url.strip()}"
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def _render_segments_concurrent(
+        self,
+        *,
+        task_id: str,
+        segments: Sequence[Mapping[str, Any]] | Sequence[Dict[str, Any]],
+        video_path: Path,
+        clips_output_dir: Path,
+        font_family,
+        font_size,
+        font_color,
+        caption_template,
+        output_format,
+        add_subtitles,
+        cleanup_settings: Dict[str, Any],
+        base_order: int,
+        existing_clip_ids: list[str],
+        progress_base: int,
+        progress_span: int,
+        check_cancelled,
+        update_progress,
+        clip_ready_callback=None,
+        progress_label: str = "Creating clip",
+    ) -> list[str]:
+        """Render clips with bounded CPU concurrency; persist DB rows in order."""
+        total = len(segments)
+        if total == 0:
+            return list(existing_clip_ids)
+
+        concurrency = max(1, int(getattr(self.config, "clip_render_concurrency", 1) or 1))
+        clip_ids = list(existing_clip_ids)
+        pending_clip_path: Optional[Path] = None
+
+        for wave_start in range(0, total, concurrency):
+            await check_cancelled()
+            wave = list(segments[wave_start : wave_start + concurrency])
+            wave_indexes = list(range(wave_start, wave_start + len(wave)))
+
+            async def _render_one(local_i: int, segment: Mapping[str, Any] | Dict[str, Any]):
+                return local_i, await self.video_service.create_single_clip(
+                    video_path,
+                    segment,
+                    base_order + local_i,
+                    clips_output_dir,
+                    font_family,
+                    font_size,
+                    font_color,
+                    caption_template,
+                    output_format,
+                    add_subtitles,
+                    cleanup_settings,
+                )
+
+            rendered = await asyncio.gather(
+                *[_render_one(i, seg) for i, seg in zip(wave_indexes, wave)]
+            )
+            # Persist in clip order so clip_order / SSE stay sequential.
+            for local_i, clip_info in sorted(rendered, key=lambda item: item[0]):
+                await check_cancelled()
+                clip_progress = progress_base + (
+                    int(((local_i + 1) / total) * progress_span) if total else progress_span
+                )
+                await update_progress(
+                    clip_progress,
+                    f"{progress_label} {local_i + 1}/{total}…",
+                )
+                if clip_info is None:
+                    continue
+                pending_clip_path = Path(clip_info["path"])
+                async with self._processing_transaction(task_id):
+                    await check_cancelled()
+                    clip_id = await self.clip_repo.create_clip(
+                        self.db,
+                        task_id=task_id,
+                        filename=clip_info["filename"],
+                        file_path=clip_info["path"],
+                        start_time=clip_info["start_time"],
+                        end_time=clip_info["end_time"],
+                        duration=clip_info["duration"],
+                        text=clip_info.get("text", ""),
+                        relevance_score=clip_info.get("relevance_score", 0.0),
+                        reasoning=clip_info.get("reasoning", ""),
+                        clip_order=base_order + local_i + 1,
+                        virality_score=clip_info.get("virality_score", 0),
+                        hook_score=clip_info.get("hook_score", 0),
+                        engagement_score=clip_info.get("engagement_score", 0),
+                        value_score=clip_info.get("value_score", 0),
+                        shareability_score=clip_info.get("shareability_score", 0),
+                        hook_type=clip_info.get("hook_type"),
+                        hook_title=clip_info.get("hook_title"),
+                    )
+                    clip_ids = [*clip_ids, clip_id]
+                    await self.task_repo.update_task_clips(self.db, task_id, clip_ids)
+                pending_clip_path = None
+                if clip_ready_callback:
+                    clip_record = await self.clip_repo.get_clip_by_id(self.db, clip_id)
+                    if clip_record:
+                        await clip_ready_callback(
+                            base_order + local_i,
+                            base_order + total,
+                            clip_record,
+                        )
+
+        _ = pending_clip_path  # kept for parity with cancel cleanup paths
+        return clip_ids
 
     def _is_stale_queued_task(self, task: Dict[str, Any]) -> bool:
         """Detect queued tasks that have likely stalled due to worker issues."""
@@ -258,6 +372,47 @@ class TaskService(ClipEditingMixin):
             started_at = datetime.utcnow()
             stage_timings: Dict[str, float] = {}
             source_metadata = await self.task_repo.load_source_metadata(self.db, task_id)
+            ops = source_metadata.get("ops") if isinstance(source_metadata.get("ops"), dict) else {}
+            ops_action = ops.get("action")
+            generate_more_count = int(ops.get("count") or 0) if ops_action == "generate_more" else 0
+            generate_start_times = (
+                ops.get("start_times") if ops_action == "generate_more" else None
+            )
+            generate_mode = (
+                str(ops.get("mode") or "top") if ops_action == "generate_more" else "top"
+            )
+            replace_existing = bool(ops.get("replace_existing")) if ops_action == "generate_more" else False
+            # One-shot ops flag — clear so a later resume doesn't re-fire.
+            # JSONB merge keeps omitted keys, so explicitly blank `ops`.
+            if ops_action:
+                source_metadata["ops"] = {}
+                await self.task_repo.save_source_metadata(
+                    self.db, task_id, source_metadata
+                )
+
+            if ops_action == "generate_more":
+                return await self._generate_more_clips(
+                    task_id=task_id,
+                    url=url,
+                    source_type=source_type,
+                    processing_mode=processing_mode,
+                    count=max(1, generate_more_count or 5),
+                    mode=generate_mode,
+                    start_times=generate_start_times if isinstance(generate_start_times, list) else None,
+                    font_family=font_family,
+                    font_size=font_size,
+                    font_color=font_color,
+                    caption_template=caption_template,
+                    output_format=output_format,
+                    add_subtitles=add_subtitles,
+                    cleanup_settings=cleanup_settings,
+                    progress_callback=progress_callback,
+                    should_cancel=should_cancel,
+                    clip_ready_callback=clip_ready_callback,
+                    source_metadata=source_metadata,
+                    replace_existing=replace_existing,
+                )
+
             try:
                 clip_prefs = parse_clip_selection_prefs(source_metadata)
             except ValueError:
@@ -273,6 +428,22 @@ class TaskService(ClipEditingMixin):
             cached_analysis_json = (
                 cache_entry.get("analysis_json") if cache_entry else None
             )
+
+            # Fase 3 ops: reanalyze with STT reuse vs from scratch.
+            if ops_action == "reanalyze_reuse":
+                cached_analysis_json = None
+                if not cached_transcript:
+                    url_cache = await self.cache_repo.find_latest_by_source_url(
+                        self.db, url, source_type
+                    )
+                    if url_cache:
+                        cached_transcript = url_cache.get("transcript_text")
+                        if not cache_entry and url_cache.get("video_path"):
+                            cache_entry = url_cache
+            elif ops_action == "reanalyze_scratch":
+                cached_transcript = None
+                cached_analysis_json = None
+
             cache_hit = bool(cached_transcript and cached_analysis_json)
 
             await self.task_repo.update_task_runtime_metadata(
@@ -368,6 +539,64 @@ class TaskService(ClipEditingMixin):
                 analysis_json=result.get("analysis_json"),
             )
 
+            # Persist excellence telemetry on the task for UI / calibration.
+            excellent_total = int(
+                result.get("excellent_clip_count") or len(segments_to_render)
+            )
+            review_before_render = bool(source_metadata.get("review_before_render"))
+            excellence_meta = {
+                "excellent_clip_count": excellent_total,
+                "rendered_clip_count": 0 if review_before_render else int(
+                    result.get("rendered_clip_count") or len(segments_to_render)
+                ),
+                "render_ceiling": result.get("render_ceiling"),
+                "drop_log": (result.get("drop_log") or [])[:80],
+            }
+            # ETA for the full excellent pool (review UI).
+            excellent_pool = result.get("excellent_segments") or segments_to_render
+            eta_total = sum(
+                estimate_render_seconds(segment_duration_seconds(seg))
+                for seg in excellent_pool
+            )
+            excellence_meta["eta_seconds_total"] = eta_total
+            await self.task_repo.save_source_metadata(
+                self.db, task_id, {**source_metadata, **excellence_meta}
+            )
+
+            # Fase 4: pause after analysis so the user picks what to render.
+            if review_before_render:
+                await check_cancelled()
+                review_message = (
+                    f"{excellent_total} excelentes — revise e escolha quais gerar"
+                )
+                paused = await self.task_repo.update_task_status(
+                    self.db,
+                    task_id,
+                    "awaiting_review",
+                    progress=70,
+                    progress_message=review_message,
+                    expected_statuses=["processing"],
+                )
+                if paused is False:
+                    raise TaskCancelled()
+                if progress_callback:
+                    await progress_callback(70, review_message, "awaiting_review")
+                await self.task_repo.update_task_runtime_metadata(
+                    self.db,
+                    task_id,
+                    stage_timings_json=json.dumps(stage_timings),
+                    error_code="",
+                )
+                return {
+                    "task_id": task_id,
+                    "clips_count": 0,
+                    "awaiting_review": True,
+                    "excellent_clip_count": excellent_total,
+                    "eta_seconds_total": eta_total,
+                    "summary": result.get("summary"),
+                    "key_topics": result.get("key_topics"),
+                }
+
             video_path = Path(result["video_path"])
             total_clips = len(segments_to_render)
             clips_output_dir = Path(self.config.temp_dir) / "clips"
@@ -380,79 +609,28 @@ class TaskService(ClipEditingMixin):
                 await self.clip_repo.delete_clips_by_task(self.db, task_id)
                 await self.task_repo.update_task_clips(self.db, task_id, [])
 
-            clip_ids = []
             render_start = perf_counter()
-
-            for i, segment in enumerate(segments_to_render):
-                # Check cancellation
-                await check_cancelled()
-
-                # Update progress: 70-95% spread across clips
-                clip_progress = 70 + int(
-                    ((i + 1) / total_clips) * 25
-                ) if total_clips > 0 else 95
-                await update_progress(
-                    clip_progress,
-                    f"Creating clip {i + 1}/{total_clips}...",
-                )
-
-                # Render single clip in thread pool
-                clip_info = await self.video_service.create_single_clip(
-                    video_path,
-                    segment,
-                    i,
-                    clips_output_dir,
-                    font_family,
-                    font_size,
-                    font_color,
-                    caption_template,
-                    output_format,
-                    add_subtitles,
-                    normalized_cleanup_settings,
-                )
-                pending_clip_path = Path(clip_info["path"]) if clip_info else None
-                await check_cancelled()
-                if clip_info is None:
-                    continue  # Skip failed clip
-
-                async with self._processing_transaction(task_id):
-                    await check_cancelled()
-                    # Save to DB immediately
-                    clip_id = await self.clip_repo.create_clip(
-                        self.db,
-                        task_id=task_id,
-                        filename=clip_info["filename"],
-                        file_path=clip_info["path"],
-                        start_time=clip_info["start_time"],
-                        end_time=clip_info["end_time"],
-                        duration=clip_info["duration"],
-                        text=clip_info.get("text", ""),
-                        relevance_score=clip_info.get("relevance_score", 0.0),
-                        reasoning=clip_info.get("reasoning", ""),
-                        clip_order=i + 1,
-                        virality_score=clip_info.get("virality_score", 0),
-                        hook_score=clip_info.get("hook_score", 0),
-                        engagement_score=clip_info.get("engagement_score", 0),
-                        value_score=clip_info.get("value_score", 0),
-                        shareability_score=clip_info.get("shareability_score", 0),
-                        hook_type=clip_info.get("hook_type"),
-                        hook_title=clip_info.get("hook_title"),
-                    )
-
-                    # Update task's clip IDs array
-                    await self.task_repo.update_task_clips(self.db, task_id, [*clip_ids, clip_id])
-
-                    await check_cancelled()
-                pending_clip_path = None
-                clip_ids.append(clip_id)
-
-                # Notify frontend via SSE
-                if clip_ready_callback:
-                    clip_record = await self.clip_repo.get_clip_by_id(
-                        self.db, clip_id
-                    )
-                    if clip_record:
-                        await clip_ready_callback(i, total_clips, clip_record)
+            clip_ids = await self._render_segments_concurrent(
+                task_id=task_id,
+                segments=segments_to_render,
+                video_path=video_path,
+                clips_output_dir=clips_output_dir,
+                font_family=font_family,
+                font_size=font_size,
+                font_color=font_color,
+                caption_template=caption_template,
+                output_format=output_format,
+                add_subtitles=add_subtitles,
+                cleanup_settings=normalized_cleanup_settings,
+                base_order=0,
+                existing_clip_ids=[],
+                progress_base=70,
+                progress_span=25,
+                check_cancelled=check_cancelled,
+                update_progress=update_progress,
+                clip_ready_callback=clip_ready_callback,
+            )
+            pending_clip_path = None
 
             stage_timings["render_seconds"] = round(
                 perf_counter() - render_start, 3
@@ -463,19 +641,26 @@ class TaskService(ClipEditingMixin):
 
             # A cancellation committed after the final render must win over completion.
             await check_cancelled()
+            rendered_total = int(result.get("rendered_clip_count") or total_clips)
+            if excellent_total > rendered_total:
+                done_message = (
+                    f"Pronto! {rendered_total} de {excellent_total} excelentes"
+                )
+            else:
+                done_message = f"Pronto! {rendered_total} corte(s) excelente(s)"
             completed = await self.task_repo.update_task_status(
                 self.db,
                 task_id,
                 "completed",
                 progress=100,
-                progress_message="Complete!",
+                progress_message=done_message,
                 expected_statuses=["processing"],
             )
             if completed is False:
                 raise TaskCancelled()
 
             if progress_callback:
-                await progress_callback(100, "Complete!", "completed")
+                await progress_callback(100, done_message, "completed")
 
             await self.task_repo.update_task_runtime_metadata(
                 self.db,
@@ -612,6 +797,316 @@ class TaskService(ClipEditingMixin):
                 "Failed to send completion notification for task %s",
                 task_id,
             )
+
+    async def _generate_more_clips(
+        self,
+        *,
+        task_id: str,
+        url: str,
+        source_type: str,
+        processing_mode: str,
+        count: int,
+        mode: str = "top",
+        start_times: Optional[list] = None,
+        font_family: Optional[str],
+        font_size: Optional[int],
+        font_color: Optional[str],
+        caption_template: str,
+        output_format: str,
+        add_subtitles: bool,
+        cleanup_settings: Optional[Dict[str, Any]],
+        progress_callback: Optional[Callable],
+        should_cancel: Optional[Callable],
+        clip_ready_callback: Optional[Callable],
+        source_metadata: Dict[str, Any],
+        replace_existing: bool = False,
+    ) -> Dict[str, Any]:
+        """Render excellent clips from analysis cache (next N, selected, or all)."""
+
+        async def check_cancelled():
+            if should_cancel and await should_cancel():
+                raise TaskCancelled()
+
+        async def update_progress(progress: int, message: str, status: str = "processing"):
+            await check_cancelled()
+            changed = await self.task_repo.update_task_status(
+                self.db,
+                task_id,
+                status,
+                progress=progress,
+                progress_message=message,
+                expected_statuses=["processing", "awaiting_review"],
+            )
+            if changed is False:
+                raise TaskCancelled()
+            if progress_callback:
+                await progress_callback(progress, message, status)
+
+        try:
+            clip_prefs = parse_clip_selection_prefs(source_metadata)
+        except ValueError:
+            clip_prefs = ClipSelectionPrefs()
+
+        cache_key = self._build_cache_key(
+            url, source_type, processing_mode, prefs=clip_prefs
+        )
+        cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
+        if not cache_entry or not cache_entry.get("analysis_json"):
+            url_cache = await self.cache_repo.find_latest_by_source_url(
+                self.db, url, source_type
+            )
+            cache_entry = url_cache or cache_entry
+
+        if not cache_entry or not cache_entry.get("analysis_json"):
+            raise ValueError(
+                "Nenhuma análise em cache para gerar mais cortes. Use Reanalisar primeiro."
+            )
+        if not cache_entry.get("video_path"):
+            raise ValueError(
+                "Vídeo em cache indisponível. Use Reanalisar (reuse) para regenerar."
+            )
+
+        try:
+            analysis = json.loads(cache_entry["analysis_json"])
+        except json.JSONDecodeError as exc:
+            raise ValueError("Cache de análise inválido") from exc
+
+        excellent = list(
+            analysis.get("excellent_segments")
+            or analysis.get("most_relevant_segments")
+            or []
+        )
+        if not excellent:
+            raise ValueError("Não há cortes excelentes restantes neste vídeo.")
+
+        existing = await self.clip_repo.get_clips_by_task(self.db, task_id)
+        if replace_existing:
+            async with self._processing_transaction(task_id):
+                await check_cancelled()
+                await self.clip_repo.delete_clips_by_task(self.db, task_id)
+                await self.task_repo.update_task_clips(self.db, task_id, [])
+            existing = []
+
+        rendered_starts = {
+            str(clip.get("start_time") or "").strip()
+            for clip in existing
+            if clip.get("start_time")
+        }
+        skipped_starts = {
+            str(s).strip()
+            for s in (source_metadata.get("skipped_starts") or [])
+            if s
+        }
+        to_render = select_candidates_for_render(
+            excellent,
+            mode=mode,
+            start_times=start_times,
+            count=count,
+            rendered_starts=rendered_starts,
+            skipped_starts=skipped_starts,
+            ceiling=count if mode == "top" else None,
+        )
+        if not to_render:
+            raise ValueError("Nenhum corte selecionado disponível para gerar.")
+
+        remaining_after = [
+            seg
+            for seg in excellent
+            if str(seg.get("start_time") or "").strip() not in rendered_starts
+            and str(seg.get("start_time") or "").strip() not in skipped_starts
+            and str(seg.get("start_time") or "").strip()
+            not in {str(s.get("start_time") or "").strip() for s in to_render}
+        ]
+        await update_progress(
+            20,
+            f"Gerando {len(to_render)} corte(s) selecionado(s)…",
+        )
+
+        started = await self.task_repo.update_task_status(
+            self.db,
+            task_id,
+            "processing",
+            progress=20,
+            progress_message=f"Gerando {len(to_render)} cortes…",
+            expected_statuses=["queued", "processing", "awaiting_review"],
+        )
+        if started is False:
+            raise TaskCancelled()
+
+        video_path = Path(cache_entry["video_path"])
+        if not video_path.exists():
+            raise ValueError(
+                "Arquivo de vídeo sumiu do cache. Use Reanalisar para baixar de novo."
+            )
+
+        normalized_cleanup = normalize_clip_cleanup_settings(
+            **(cleanup_settings or {})
+        )
+        clips_output_dir = Path(self.config.temp_dir) / "clips"
+        clips_output_dir.mkdir(parents=True, exist_ok=True)
+
+        base_order = len(existing)
+        clip_ids = await self._render_segments_concurrent(
+            task_id=task_id,
+            segments=to_render,
+            video_path=video_path,
+            clips_output_dir=clips_output_dir,
+            font_family=font_family,
+            font_size=font_size,
+            font_color=font_color,
+            caption_template=caption_template,
+            output_format=output_format,
+            add_subtitles=add_subtitles,
+            cleanup_settings=normalized_cleanup,
+            base_order=base_order,
+            existing_clip_ids=[str(c["id"]) for c in existing if c.get("id")],
+            progress_base=30,
+            progress_span=60,
+            check_cancelled=check_cancelled,
+            update_progress=update_progress,
+            clip_ready_callback=clip_ready_callback,
+            progress_label="Criando corte",
+        )
+
+        new_rendered = len(clip_ids)
+        excellent_total = int(
+            analysis.get("excellent_clip_count") or len(excellent)
+        )
+        await self.task_repo.save_source_metadata(
+            self.db,
+            task_id,
+            {
+                **source_metadata,
+                "excellent_clip_count": excellent_total,
+                "rendered_clip_count": new_rendered,
+                "review_before_render": False,
+            },
+        )
+
+        done_message = (
+            f"Pronto! {new_rendered} de {excellent_total} excelentes"
+            if excellent_total > new_rendered
+            else f"Pronto! {new_rendered} corte(s) excelente(s)"
+        )
+        completed = await self.task_repo.update_task_status(
+            self.db,
+            task_id,
+            "completed",
+            progress=100,
+            progress_message=done_message,
+            expected_statuses=["processing", "awaiting_review"],
+        )
+        if completed is False:
+            raise TaskCancelled()
+        if progress_callback:
+            await progress_callback(100, done_message, "completed")
+
+        return {
+            "task_id": task_id,
+            "clips_count": new_rendered,
+            "added": len(to_render),
+            "excellent_clip_count": excellent_total,
+            "remaining": len(remaining_after),
+        }
+
+    async def list_review_candidates(self, task_id: str) -> Dict[str, Any]:
+        """Excellent pool for review UI (score, title, preview, ETA)."""
+        task = await self.task_repo.get_task_by_id(self.db, task_id)
+        if not task:
+            raise ValueError("Task not found")
+        metadata = await self.task_repo.load_source_metadata(self.db, task_id)
+        try:
+            clip_prefs = parse_clip_selection_prefs(metadata)
+        except ValueError:
+            clip_prefs = ClipSelectionPrefs()
+        url = task.get("source_url") or metadata.get("url") or ""
+        source_type = task.get("source_type") or metadata.get("source_type") or "youtube"
+        processing_mode = task.get("processing_mode") or self.config.default_processing_mode
+        cache_key = self._build_cache_key(url, source_type, processing_mode, prefs=clip_prefs)
+        cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
+        if not cache_entry or not cache_entry.get("analysis_json"):
+            cache_entry = await self.cache_repo.find_latest_by_source_url(
+                self.db, url, source_type
+            )
+        if not cache_entry or not cache_entry.get("analysis_json"):
+            raise ValueError("Nenhuma análise em cache para revisar.")
+
+        analysis = json.loads(cache_entry["analysis_json"])
+        excellent = list(
+            analysis.get("excellent_segments")
+            or analysis.get("most_relevant_segments")
+            or []
+        )
+        clips = await self.clip_repo.get_clips_by_task(self.db, task_id)
+        rendered_starts = [str(c.get("start_time") or "") for c in clips]
+        skipped_starts = list(metadata.get("skipped_starts") or [])
+        candidates = build_candidate_rows(
+            excellent,
+            rendered_starts=rendered_starts,
+            skipped_starts=skipped_starts,
+        )
+        pending = [c for c in candidates if not c["rendered"] and not c["skipped"]]
+        eta_pending = sum(int(c["eta_seconds"]) for c in pending)
+        eta_selected_hint = sum(int(c["eta_seconds"]) for c in pending[:15])
+        return {
+            "task_id": task_id,
+            "status": task.get("status"),
+            "candidates": candidates,
+            "excellent_clip_count": int(
+                analysis.get("excellent_clip_count") or len(excellent)
+            ),
+            "rendered_count": len([c for c in candidates if c["rendered"]]),
+            "skipped_count": len([c for c in candidates if c["skipped"]]),
+            "pending_count": len(pending),
+            "eta_seconds_pending": eta_pending,
+            "eta_seconds_top15": eta_selected_hint,
+            "render_ceiling": metadata.get("render_ceiling") or 15,
+            "review_before_render": bool(metadata.get("review_before_render")),
+        }
+
+    async def skip_review_candidates(
+        self,
+        task_id: str,
+        start_times: list[str],
+        *,
+        permanent: bool = False,
+    ) -> Dict[str, Any]:
+        """Mark candidates skipped; optional permanent → EVITAR in brief."""
+        metadata = await self.task_repo.load_source_metadata(self.db, task_id)
+        skipped = {
+            str(s).strip()
+            for s in (metadata.get("skipped_starts") or [])
+            if s
+        }
+        wanted = {str(s).strip() for s in start_times if s}
+        skipped |= wanted
+
+        phrases: list[str] = []
+        if permanent and wanted:
+            try:
+                candidates = await self.list_review_candidates(task_id)
+                for row in candidates.get("candidates") or []:
+                    if row.get("start_time") in wanted:
+                        title = (row.get("hook_title") or "").strip()
+                        preview = (row.get("text_preview") or "").strip()
+                        phrases.append(title or preview[:80])
+            except ValueError:
+                phrases = []
+            if phrases:
+                try:
+                    prefs = parse_clip_selection_prefs(metadata)
+                except ValueError:
+                    prefs = ClipSelectionPrefs()
+                new_brief = append_evitar_phrases(prefs.brief, phrases)
+                metadata["clip_brief"] = new_brief
+
+        metadata["skipped_starts"] = sorted(skipped)
+        await self.task_repo.save_source_metadata(self.db, task_id, metadata)
+        return {
+            "skipped_starts": metadata["skipped_starts"],
+            "permanent": permanent,
+            "brief_updated": bool(permanent and phrases),
+        }
 
     async def get_task_with_clips(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Get task details with all clips."""

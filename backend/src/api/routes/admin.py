@@ -27,9 +27,14 @@ SETTING_METADATA = {
         "description": "Used for video transcription.",
         "input_type": "password",
     },
+    "TRANSCRIPTION_PROVIDER": {
+        "label": "Transcription provider",
+        "description": "assemblyai | whisper | youtube_captions — STT backend for new tasks.",
+        "input_type": "text",
+    },
     "LLM": {
         "label": "LLM model",
-        "description": "Provider and model, for example openai:gpt-5.2.",
+        "description": "Provider and model, for example openrouter:anthropic/claude-sonnet-4.5.",
         "input_type": "text",
     },
     "OPENAI_API_KEY": {

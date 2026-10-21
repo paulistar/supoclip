@@ -82,9 +82,10 @@ These settings affect clip generation speed, throughput, and defaults.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DEFAULT_PROCESSING_MODE` | `fast` | Default mode for new tasks |
+| `DEFAULT_PROCESSING_MODE` | `fast` | Default mode for new tasks (`fast` / `balanced` / `quality`) |
 | `FAST_MODE_MAX_CLIPS` | `10` | Clip cap used by fast mode (never above `MAX_CLIPS`) |
-| `FAST_MODE_TRANSCRIPT_MODEL` | `nano` | Lightweight transcript path for fast mode |
+| `CLIP_RENDER_CONCURRENCY` | `2` | How many clips to ffmpeg-render in parallel per worker |
+| `FAST_MODE_TRANSCRIPT_MODEL` | `nano` | Lightweight transcript path for fast/balanced AssemblyAI |
 | `WHISPER_MODEL_SIZE` | `medium` in `.env.example` | Whisper model size when Whisper is used locally |
 | `QUEUED_TASK_TIMEOUT_SECONDS` | `180` | Marks stale queued tasks as failed instead of leaving them stuck forever |
 | `MAX_VIDEO_DURATION` | `5400` | Maximum accepted upload length and baseline YouTube length in seconds |
@@ -95,7 +96,13 @@ These settings affect clip generation speed, throughput, and defaults.
 
 ### Processing modes
 
-Current code and defaults emphasize a `fast` mode. If you expose additional modes such as `balanced` or `quality`, make sure the frontend and backend behavior stay aligned.
+| Mode | STT (AssemblyAI) | Discovery ceiling |
+|---|---|---|
+| `fast` | `FAST_MODE_TRANSCRIPT_MODEL` | min(`MAX_CLIPS`, `FAST_MODE_MAX_CLIPS`) |
+| `balanced` | `FAST_MODE_TRANSCRIPT_MODEL` | `MAX_CLIPS` |
+| `quality` | `best` | `MAX_CLIPS` |
+
+The home UI exposes all three. MCP `supoclip_create_clip_task` accepts the same `processing_mode` plus clip prefs (`clip_duration_preset`, `min_clips`, `clip_brief`, `review_before_render`).
 
 ## Media and Creative Settings
 

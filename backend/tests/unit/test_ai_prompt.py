@@ -74,6 +74,18 @@ def test_system_prompt_treats_brief_as_hard_constraint():
     assert "editorial priority for social/paid use" not in transcript_analysis_system_prompt
 
 
+def test_system_and_task_prompts_are_quality_only():
+    assert "never pad toward a count" in transcript_analysis_system_prompt.lower()
+    assert "Prefer meeting the requested count" not in transcript_analysis_system_prompt
+    prompt = build_transcript_analysis_prompt(
+        transcript="[00:12 - 00:21] A strong opening line",
+        clip_budget=15,
+    )
+    assert "quality-only" in prompt
+    assert "Do NOT pad" in prompt
+    assert "final budget near" not in prompt
+
+
 def test_extract_forbidden_phrases_from_exclusion_brief():
     brief = (
         "Prioritize curiosity hooks.\n"

@@ -245,6 +245,7 @@ def _merge_task_source_metadata(
     add_subtitles: Any = None,
     cleanup_settings: Dict[str, Any] | None = None,
     clip_selection: Dict[str, Any] | None = None,
+    review_before_render: bool | None = None,
 ) -> Dict[str, Any]:
     merged = dict(existing or {})
 
@@ -262,6 +263,8 @@ def _merge_task_source_metadata(
         merged.update(clip_selection)
         if not clip_selection.get("clip_brief"):
             merged.pop("clip_brief", None)
+    if isinstance(review_before_render, bool):
+        merged["review_before_render"] = review_before_render
 
     return merged
 
@@ -379,6 +382,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     if not isinstance(add_subtitles, bool):
         add_subtitles = True
     cleanup_settings = new_task_cleanup_settings(data)
+    review_before_render = bool(data.get("review_before_render", False))
     try:
         clip_prefs = parse_clip_selection_prefs(
             duration_preset=data.get("clip_duration_preset"),
@@ -460,6 +464,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                         add_subtitles=add_subtitles,
                         cleanup_settings=cleanup_settings,
                         clip_selection=clip_prefs.to_metadata(),
+                        review_before_render=review_before_render,
                     ),
                     db=db,
                 )
@@ -699,8 +704,8 @@ async def get_task_progress_sse(task_id: str, request: Request):
             ),
         }
 
-        # If task is already completed or error, close connection
-        if task.get("status") in ["completed", "error", "cancelled"]:
+        # If task is already terminal (or waiting for review), close connection
+        if task.get("status") in ["completed", "error", "cancelled", "awaiting_review"]:
             yield {"event": "close", "data": json.dumps({"status": task.get("status")})}
             return
 
@@ -720,8 +725,13 @@ async def get_task_progress_sse(task_id: str, request: Request):
                     event_type = progress_data.get("event_type", "progress")
                     yield {"event": event_type, "data": json.dumps(progress_data)}
 
-                    # Close connection if task is done
-                    if progress_data.get("status") in ["completed", "error", "cancelled"]:
+                    # Close connection if task is done or waiting for review
+                    if progress_data.get("status") in [
+                        "completed",
+                        "error",
+                        "cancelled",
+                        "awaiting_review",
+                    ]:
                         yield {
                             "event": "close",
                             "data": json.dumps({"status": progress_data.get("status")}),
@@ -1327,6 +1337,389 @@ async def resume_task(
     except Exception as e:
         logger.error(f"Error resuming task: {e}")
         raise HTTPException(status_code=500, detail=f"Error resuming task: {str(e)}")
+
+
+async def _enqueue_completed_task_ops(
+    *,
+    db: AsyncSession,
+    task: Dict[str, Any],
+    task_id: str,
+    metadata: Dict[str, Any],
+    ops: Dict[str, Any],
+    progress_message: str,
+) -> str:
+    """Queue a completed/cancelled/error task with a one-shot ops payload."""
+    source_url = task.get("source_url") or metadata.get("url")
+    source_type = task.get("source_type") or metadata.get("source_type")
+    if not source_url or not source_type:
+        raise HTTPException(status_code=400, detail="Task source URL is missing")
+
+    output_format = metadata.get("output_format") or "vertical"
+    if output_format not in VALID_OUTPUT_FORMATS:
+        output_format = "vertical"
+    add_subtitles = metadata.get("add_subtitles", True)
+    if not isinstance(add_subtitles, bool):
+        add_subtitles = True
+    cleanup_settings = normalize_clip_cleanup_settings(
+        metadata.get("cut_long_pauses"),
+        metadata.get("pause_threshold_ms"),
+        metadata.get("remove_filler_words"),
+        metadata.get("filtered_words"),
+    )
+
+    runtime_config = get_config()
+    redis_client = redis.Redis(
+        host=runtime_config.redis_host,
+        port=runtime_config.redis_port,
+        password=runtime_config.redis_password,
+        decode_responses=True,
+    )
+    try:
+        await redis_client.delete(f"task_cancel:{task_id}")
+    finally:
+        await redis_client.aclose()
+
+    task_service = TaskService(db)
+    await task_service.task_repo.update_task_status(
+        db,
+        task_id,
+        "queued",
+        progress=0,
+        progress_message=progress_message,
+    )
+
+    metadata["ops"] = ops
+    processing_job_id = f"{task_id}:{secrets.token_hex(16)}"
+    metadata["processing_job_id"] = processing_job_id
+    await _save_task_source_metadata(task_id, metadata, db=db)
+
+    processing_mode = (
+        task.get("processing_mode") or runtime_config.default_processing_mode
+    )
+    job_id = await JobQueue.enqueue_processing_job(
+        "process_video_task",
+        processing_mode,
+        task_id,
+        source_url,
+        source_type,
+        task["user_id"],
+        task.get("font_family"),
+        task.get("font_size"),
+        task.get("font_color"),
+        task.get("caption_template") or "default",
+        processing_mode,
+        output_format,
+        add_subtitles,
+        cleanup_settings,
+        _job_id=processing_job_id,
+    )
+    return job_id
+
+
+@router.post("/{task_id}/reanalyze")
+async def reanalyze_task(
+    task_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    """Re-run analysis on a completed task.
+
+    Body:
+      reuse_media: true = keep STT/transcript (and video); false = from scratch
+      clip_duration_preset / min_clips / clip_brief: optional prefs update
+    """
+    try:
+        task_service = TaskService(db)
+        task = await _require_task_owner(request, task_service, db, task_id)
+        payload = await _read_json_object(request)
+        reuse_media = bool(payload.get("reuse_media", True))
+
+        async with task_run_guard(db, task_id):
+            task = await task_service.task_repo.get_task_by_id(db, task_id)
+            if task.get("status") == "queued":
+                return {"message": "Task already queued"}
+            if task.get("status") not in (
+                "completed",
+                "cancelled",
+                "error",
+                "awaiting_review",
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only completed/cancelled/error/awaiting_review tasks can be reanalyzed",
+                )
+
+            metadata = await _load_task_source_metadata(task_id, db=db)
+            try:
+                clip_prefs = parse_clip_selection_prefs(
+                    metadata,
+                    duration_preset=payload.get("clip_duration_preset"),
+                    min_clips=payload.get("min_clips", metadata.get("min_clips")),
+                    clip_brief=(
+                        payload["clip_brief"]
+                        if "clip_brief" in payload
+                        else metadata.get("clip_brief")
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            metadata.update(clip_prefs.to_metadata())
+            # Empty brief must clear the previous value (JSONB merge keeps keys).
+            if not clip_prefs.brief:
+                metadata["clip_brief"] = ""
+
+            async with generation_allowance_guard(
+                db, task["user_id"], enabled=get_config().monetization_enabled
+            ):
+                await BillingService(db).assert_can_resume_task(task["user_id"], task_id)
+                ops_action = (
+                    "reanalyze_reuse" if reuse_media else "reanalyze_scratch"
+                )
+                job_id = await _enqueue_completed_task_ops(
+                    db=db,
+                    task=task,
+                    task_id=task_id,
+                    metadata=metadata,
+                    ops={"action": ops_action},
+                    progress_message=(
+                        "Reanalisando (reuse STT)…"
+                        if reuse_media
+                        else "Reanalisando do zero…"
+                    ),
+                )
+                return {
+                    "message": "Reanalysis queued",
+                    "job_id": job_id,
+                    "reuse_media": reuse_media,
+                    "clip_selection": clip_prefs.to_metadata(),
+                }
+    except GenerationAllowanceBusy as e:
+        raise HTTPException(status_code=409, detail=str(e), headers={"Retry-After": "1"})
+    except BillingLimitExceeded as e:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "SUBSCRIPTION_REQUIRED",
+                "message": e.summary.get("reason") or "Plan usage limit reached",
+                "billing": jsonable_encoder(e.summary),
+            },
+        )
+    except TaskRunBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error reanalyzing task: {e}")
+        raise HTTPException(status_code=500, detail=f"Error reanalyzing task: {str(e)}")
+
+
+@router.post("/{task_id}/generate-more")
+async def generate_more_clips(
+    task_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    """Render the next N excellent clips from analysis cache (no new analysis)."""
+    try:
+        task_service = TaskService(db)
+        task = await _require_task_owner(request, task_service, db, task_id)
+        payload = await _read_json_object(request)
+        try:
+            count = int(payload.get("count") or 5)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="count must be an integer") from exc
+        if count not in (5, 10, 15, 20) and not (1 <= count <= 20):
+            raise HTTPException(status_code=400, detail="count must be between 1 and 20")
+
+        async with task_run_guard(db, task_id):
+            task = await task_service.task_repo.get_task_by_id(db, task_id)
+            if task.get("status") == "queued":
+                return {"message": "Task already queued"}
+            if task.get("status") not in ("completed", "awaiting_review"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only completed/awaiting_review tasks can generate more clips",
+                )
+
+            remaining = None
+            metadata = await _load_task_source_metadata(task_id, db=db)
+            excellent = metadata.get("excellent_clip_count")
+            rendered = metadata.get("rendered_clip_count")
+            if isinstance(excellent, int) and isinstance(rendered, int):
+                remaining = max(0, excellent - rendered)
+                if remaining <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Todos os cortes excelentes já foram gerados",
+                    )
+                count = min(count, remaining)
+
+            async with generation_allowance_guard(
+                db, task["user_id"], enabled=get_config().monetization_enabled
+            ):
+                await BillingService(db).assert_can_resume_task(task["user_id"], task_id)
+                job_id = await _enqueue_completed_task_ops(
+                    db=db,
+                    task=task,
+                    task_id=task_id,
+                    metadata=metadata,
+                    ops={"action": "generate_more", "count": count},
+                    progress_message=f"Gerando mais {count} cortes…",
+                )
+                return {
+                    "message": "Generate-more queued",
+                    "job_id": job_id,
+                    "count": count,
+                    "remaining_before": remaining,
+                }
+    except GenerationAllowanceBusy as e:
+        raise HTTPException(status_code=409, detail=str(e), headers={"Retry-After": "1"})
+    except BillingLimitExceeded as e:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "SUBSCRIPTION_REQUIRED",
+                "message": e.summary.get("reason") or "Plan usage limit reached",
+                "billing": jsonable_encoder(e.summary),
+            },
+        )
+    except TaskRunBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating more clips: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error generating more clips: {str(e)}"
+        )
+
+
+@router.get("/{task_id}/candidates")
+async def list_task_candidates(
+    task_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    """List excellent clip candidates for review (score, title, preview, ETA)."""
+    try:
+        task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
+        return await task_service.list_review_candidates(task_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error listing candidates: {e}")
+        raise HTTPException(status_code=500, detail=f"Error listing candidates: {str(e)}")
+
+
+@router.post("/{task_id}/render-selected")
+async def render_selected_candidates(
+    task_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    """Render selected / top R / all pending excellent clips from analysis cache."""
+    try:
+        task_service = TaskService(db)
+        task = await _require_task_owner(request, task_service, db, task_id)
+        payload = await _read_json_object(request)
+        mode = str(payload.get("mode") or "selected").strip().lower()
+        if mode not in ("selected", "top", "all"):
+            raise HTTPException(
+                status_code=400, detail="mode must be selected, top, or all"
+            )
+        start_times = payload.get("start_times") or []
+        if not isinstance(start_times, list):
+            raise HTTPException(status_code=400, detail="start_times must be a list")
+        try:
+            count = int(payload.get("count") or 15)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="count must be an integer") from exc
+        count = max(1, min(60, count))
+        if mode == "selected" and not start_times:
+            raise HTTPException(
+                status_code=400, detail="start_times required when mode=selected"
+            )
+
+        async with task_run_guard(db, task_id):
+            task = await task_service.task_repo.get_task_by_id(db, task_id)
+            if task.get("status") == "queued":
+                return {"message": "Task already queued"}
+            if task.get("status") not in ("completed", "awaiting_review"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Only completed/awaiting_review tasks can render selected clips",
+                )
+
+            metadata = await _load_task_source_metadata(task_id, db=db)
+            async with generation_allowance_guard(
+                db, task["user_id"], enabled=get_config().monetization_enabled
+            ):
+                await BillingService(db).assert_can_resume_task(task["user_id"], task_id)
+                job_id = await _enqueue_completed_task_ops(
+                    db=db,
+                    task=task,
+                    task_id=task_id,
+                    metadata=metadata,
+                    ops={
+                        "action": "generate_more",
+                        "mode": mode,
+                        "count": count,
+                        "start_times": [str(s) for s in start_times if s],
+                        "replace_existing": bool(payload.get("replace_existing")),
+                    },
+                    progress_message=f"Gerando cortes ({mode})…",
+                )
+                return {
+                    "message": "Render-selected queued",
+                    "job_id": job_id,
+                    "mode": mode,
+                    "count": count,
+                    "start_times": start_times,
+                }
+    except GenerationAllowanceBusy as e:
+        raise HTTPException(status_code=409, detail=str(e), headers={"Retry-After": "1"})
+    except BillingLimitExceeded as e:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "SUBSCRIPTION_REQUIRED",
+                "message": e.summary.get("reason") or "Plan usage limit reached",
+                "billing": jsonable_encoder(e.summary),
+            },
+        )
+    except TaskRunBusy as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rendering selected clips: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error rendering selected clips: {str(e)}"
+        )
+
+
+@router.post("/{task_id}/skip-candidates")
+async def skip_task_candidates(
+    task_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    """Skip candidates; permanent=true appends titles to EVITAR in the brief."""
+    try:
+        task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
+        payload = await _read_json_object(request)
+        start_times = payload.get("start_times") or []
+        if not isinstance(start_times, list) or not start_times:
+            raise HTTPException(status_code=400, detail="start_times required")
+        permanent = bool(payload.get("permanent", False))
+        result = await task_service.skip_review_candidates(
+            task_id,
+            [str(s) for s in start_times if s],
+            permanent=permanent,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error skipping candidates: {e}")
+        raise HTTPException(status_code=500, detail=f"Error skipping candidates: {str(e)}")
 
 
 @router.get("/dead-letter/list")

@@ -36,6 +36,7 @@ async def test_analysis_recovers_from_gemini_overload_without_changing_prompt(
         SimpleNamespace(output=analysis),
     ]))
     monkeypatch.setattr(ai, "get_transcript_agent", lambda: agent)
+    monkeypatch.setattr(ai, "rewrite_hook_titles", AsyncMock(side_effect=lambda segs: segs))
 
     result = await ai.get_most_relevant_parts_by_transcript(transcript)
 

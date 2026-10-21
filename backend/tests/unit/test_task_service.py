@@ -98,14 +98,21 @@ def build_task_service() -> TaskService:
 
 
 def test_cache_key_includes_analysis_prompt_version():
+    from src.services.task_service import PROCESSING_CACHE_VERSION
+    from src.clip_selection import ClipSelectionPrefs
+
     url = "https://www.youtube.com/watch?v=demo"
     cache_key = TaskService._build_cache_key(
         url,
         "youtube",
         "fast",
     )
+    prefs = ClipSelectionPrefs()
     expected = hashlib.sha256(
-        f"youtube|fast|{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|{url}".encode("utf-8")
+        (
+            f"youtube|fast|{PROCESSING_CACHE_VERSION}|{TRANSCRIPT_ANALYSIS_CACHE_VERSION}|"
+            f"{prefs.cache_token()}|{url}"
+        ).encode("utf-8")
     ).hexdigest()
 
     assert cache_key == expected

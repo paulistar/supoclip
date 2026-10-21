@@ -42,10 +42,12 @@ from ..clip_source_map import (
 )
 from ..ai import get_most_relevant_parts_by_transcript
 from ..clip_selection import (
+    DEFAULT_DISCOVERY_SAFETY_CAP,
     ClipSelectionPrefs,
+    discovery_ceiling,
     physical_max_clips,
     preset_is_feasible,
-    resolve_clip_budget,
+    render_ceiling,
 )
 from ..config import get_config
 
@@ -55,6 +57,52 @@ UPLOAD_URL_PREFIX = "upload://"
 
 class VideoService:
     """Service for video processing operations."""
+
+    @staticmethod
+    def _segment_to_payload(segment: Any) -> Dict[str, Any]:
+        """Normalize a TranscriptSegment or dict into the pipeline segment shape."""
+        if isinstance(segment, dict):
+            virality = segment.get("virality") or {}
+            if hasattr(virality, "model_dump"):
+                virality = virality.model_dump()
+            return {
+                "start_time": segment.get("start_time"),
+                "end_time": segment.get("end_time"),
+                "text": segment.get("text", ""),
+                "relevance_score": segment.get("relevance_score", 0.0),
+                "reasoning": segment.get("reasoning", ""),
+                "virality_score": virality.get("total_score", segment.get("virality_score", 0)),
+                "hook_score": virality.get("hook_score", segment.get("hook_score", 0)),
+                "engagement_score": virality.get(
+                    "engagement_score", segment.get("engagement_score", 0)
+                ),
+                "value_score": virality.get("value_score", segment.get("value_score", 0)),
+                "shareability_score": virality.get(
+                    "shareability_score", segment.get("shareability_score", 0)
+                ),
+                "hook_type": virality.get("hook_type", segment.get("hook_type")),
+                "hook_title": segment.get("hook_title"),
+                "hook_start_time": segment.get("hook_start_time"),
+                "hook_end_time": segment.get("hook_end_time"),
+            }
+
+        virality = segment.virality.model_dump() if getattr(segment, "virality", None) else {}
+        return {
+            "start_time": segment.start_time,
+            "end_time": segment.end_time,
+            "text": segment.text,
+            "relevance_score": segment.relevance_score,
+            "reasoning": segment.reasoning,
+            "virality_score": virality.get("total_score", 0),
+            "hook_score": virality.get("hook_score", 0),
+            "engagement_score": virality.get("engagement_score", 0),
+            "value_score": virality.get("value_score", 0),
+            "shareability_score": virality.get("shareability_score", 0),
+            "hook_type": virality.get("hook_type"),
+            "hook_title": getattr(segment, "hook_title", None),
+            "hook_start_time": getattr(segment, "hook_start_time", None),
+            "hook_end_time": getattr(segment, "hook_end_time", None),
+        }
 
     @staticmethod
     def _ground_segment_text(
@@ -181,9 +229,12 @@ class VideoService:
         logger.info(f"Generating transcript for: {video_path}")
         speech_model = "best"
         runtime_config = get_config()
-        # The fast-mode model selector is only meaningful for AssemblyAI; the
-        # other providers ignore it and would otherwise silently change behaviour.
-        if processing_mode == "fast" and runtime_config.transcription_provider == "assemblyai":
+        # AssemblyAI only: fast/balanced use the cheaper/faster speech model;
+        # quality keeps "best". Other providers ignore this selector.
+        if (
+            processing_mode in {"fast", "balanced"}
+            and runtime_config.transcription_provider == "assemblyai"
+        ):
             speech_model = runtime_config.fast_mode_transcript_model
 
         transcript = await run_in_thread(
@@ -523,7 +574,7 @@ class VideoService:
 
             if progress_callback:
                 await progress_callback(
-                    50, "Analyzing content with AI...", "processing"
+                    50, "Buscando cortes excelentes...", "processing"
                 )
 
             relevant_parts = None
@@ -531,7 +582,10 @@ class VideoService:
                 try:
                     cached_analysis = json.loads(cached_analysis_json)
                     segments = cached_analysis.get("most_relevant_segments", [])
-                    if not segments:
+                    excellent_cached = (
+                        cached_analysis.get("excellent_segments") or segments
+                    )
+                    if not segments and not excellent_cached:
                         logger.info(
                             "Ignoring cached transcript analysis with no clip segments"
                         )
@@ -544,12 +598,25 @@ class VideoService:
                                 self.most_relevant_segments = payload.get(
                                     "most_relevant_segments", []
                                 )
+                                self._excellent_segments = payload.get(
+                                    "excellent_segments"
+                                ) or self.most_relevant_segments
+                                self._excellent_clip_count = int(
+                                    payload.get("excellent_clip_count")
+                                    or len(self._excellent_segments)
+                                )
+                                self._drop_log = list(payload.get("drop_log") or [])
 
                         relevant_parts = _SimpleResult(
                             {
                                 "summary": cached_analysis.get("summary"),
                                 "key_topics": cached_analysis.get("key_topics", []),
-                                "most_relevant_segments": segments,
+                                "most_relevant_segments": segments or excellent_cached,
+                                "excellent_segments": excellent_cached,
+                                "excellent_clip_count": cached_analysis.get(
+                                    "excellent_clip_count"
+                                ),
+                                "drop_log": cached_analysis.get("drop_log") or [],
                             }
                         )
                 except Exception:
@@ -575,68 +642,73 @@ class VideoService:
             if should_cancel and await should_cancel():
                 raise Exception("Task cancelled")
 
-            if progress_callback:
-                await progress_callback(70, "Creating video clips...", "processing")
-
-            raw_segments = relevant_parts.most_relevant_segments
-            segments_json: List[Dict[str, Any]] = []
+            excellent_raw = list(
+                getattr(relevant_parts, "_excellent_segments", None)
+                or relevant_parts.most_relevant_segments
+                or []
+            )
+            drop_log = list(getattr(relevant_parts, "_drop_log", None) or [])
             transcript_data = load_cached_transcript_data(video_path)
-            for segment in raw_segments:
-                if isinstance(segment, dict):
-                    virality = segment.get("virality") or {}
-                    if hasattr(virality, "model_dump"):
-                        virality = virality.model_dump()
-                    segment_payload = {
-                        "start_time": segment.get("start_time"),
-                        "end_time": segment.get("end_time"),
-                        "text": segment.get("text", ""),
-                        "relevance_score": segment.get("relevance_score", 0.0),
-                        "reasoning": segment.get("reasoning", ""),
-                        "virality_score": virality.get("total_score", 0),
-                        "hook_score": virality.get("hook_score", 0),
-                        "engagement_score": virality.get("engagement_score", 0),
-                        "value_score": virality.get("value_score", 0),
-                        "shareability_score": virality.get("shareability_score", 0),
-                        "hook_type": virality.get("hook_type"),
-                        "hook_title": segment.get("hook_title"),
-                        "hook_start_time": segment.get("hook_start_time"),
-                        "hook_end_time": segment.get("hook_end_time"),
-                    }
-                else:
-                    virality = segment.virality.model_dump() if segment.virality else {}
-                    segment_payload = {
-                        "start_time": segment.start_time,
-                        "end_time": segment.end_time,
-                        "text": segment.text,
-                        "relevance_score": segment.relevance_score,
-                        "reasoning": segment.reasoning,
-                        "virality_score": virality.get("total_score", 0),
-                        "hook_score": virality.get("hook_score", 0),
-                        "engagement_score": virality.get("engagement_score", 0),
-                        "value_score": virality.get("value_score", 0),
-                        "shareability_score": virality.get("shareability_score", 0),
-                        "hook_type": virality.get("hook_type"),
-                        "hook_title": getattr(segment, "hook_title", None),
-                        "hook_start_time": getattr(segment, "hook_start_time", None),
-                        "hook_end_time": getattr(segment, "hook_end_time", None),
-                    }
 
-                segment_payload["text"] = VideoService._ground_segment_text(
-                    segment_payload,
-                    transcript_data,
+            excellent_json: List[Dict[str, Any]] = []
+            for segment in excellent_raw:
+                payload = VideoService._segment_to_payload(segment)
+                payload["text"] = VideoService._ground_segment_text(
+                    payload, transcript_data
                 )
-                segments_json.append(segment_payload)
+                excellent_json.append(payload)
+
+            # Cached payloads may only have the render slice.
+            if not excellent_json and isinstance(relevant_parts, object):
+                cached_segments = getattr(relevant_parts, "most_relevant_segments", []) or []
+                for segment in cached_segments:
+                    payload = VideoService._segment_to_payload(segment)
+                    payload["text"] = VideoService._ground_segment_text(
+                        payload, transcript_data
+                    )
+                    excellent_json.append(payload)
 
             server_ceiling = runtime_config.max_clips
             if processing_mode == "fast":
                 server_ceiling = min(server_ceiling, runtime_config.fast_mode_max_clips)
-            clip_limit = resolve_clip_budget(
+            discover = discovery_ceiling(
                 float(file_duration or 0),
                 selection,
                 max_clips=server_ceiling,
-                absolute_ceiling=20,
+                absolute_ceiling=DEFAULT_DISCOVERY_SAFETY_CAP,
             )
-            segments_json = segments_json[: max(1, clip_limit)]
+            clip_limit = render_ceiling(selection, discovery=discover)
+            # Fresh analysis already sliced to render_ceiling; cached payloads
+            # may still hold the full excellent list — slice defensively.
+            if getattr(relevant_parts, "_excellent_segments", None):
+                segments_json = excellent_json[: max(1, clip_limit)]
+            else:
+                segments_json = excellent_json[: max(1, clip_limit)]
+
+            excellent_total = int(
+                getattr(relevant_parts, "_excellent_clip_count", None)
+                or len(excellent_json)
+                or len(segments_json)
+            )
+            rendered_count = len(segments_json)
+            if excellent_total < rendered_count:
+                excellent_total = rendered_count
+            if len(excellent_json) < excellent_total:
+                excellent_total = max(excellent_total, len(excellent_json))
+
+            if progress_callback:
+                if excellent_total > rendered_count:
+                    await progress_callback(
+                        70,
+                        f"{excellent_total} excelentes — gerando top {rendered_count}…",
+                        "processing",
+                    )
+                else:
+                    await progress_callback(
+                        70,
+                        f"Gerando {rendered_count} corte(s) excelente(s)…",
+                        "processing",
+                    )
 
             if not segments_json:
                 logger.warning(
@@ -649,15 +721,23 @@ class VideoService:
                         runtime_config.clip_duration,
                     )
                 ]
+                excellent_json = list(segments_json)
+                excellent_total = 1
+                rendered_count = 1
 
             return {
                 "segments": segments_json,
                 "segments_to_render": segments_json,
+                "excellent_segments": excellent_json,
                 "video_path": str(video_path),
                 "clips": [],
                 "summary": relevant_parts.summary if relevant_parts else None,
                 "key_topics": relevant_parts.key_topics if relevant_parts else None,
                 "transcript": transcript,
+                "excellent_clip_count": excellent_total,
+                "rendered_clip_count": rendered_count,
+                "render_ceiling": clip_limit,
+                "drop_log": drop_log,
                 "analysis_json": json.dumps(
                     {
                         "summary": relevant_parts.summary if relevant_parts else None,
@@ -665,6 +745,11 @@ class VideoService:
                         if relevant_parts
                         else [],
                         "most_relevant_segments": segments_json,
+                        "excellent_segments": excellent_json,
+                        "excellent_clip_count": excellent_total,
+                        "rendered_clip_count": rendered_count,
+                        "render_ceiling": clip_limit,
+                        "drop_log": drop_log,
                     }
                 ),
             }

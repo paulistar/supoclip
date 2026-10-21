@@ -28,7 +28,8 @@ class Config:
 
         self.whisper_model = os.getenv("WHISPER_MODEL") or os.getenv("WHISPER_MODEL_SIZE", "base")
         self.transcription_provider = self._normalize_transcription_provider(
-            os.getenv("TRANSCRIPTION_PROVIDER", "assemblyai")
+            self._get_runtime_setting("TRANSCRIPTION_PROVIDER")
+            or os.getenv("TRANSCRIPTION_PROVIDER", "assemblyai")
         )
         # Empty means auto-detect the spoken language; otherwise an AssemblyAI
         # language code such as "es" or "en_us" forces it.
@@ -104,7 +105,8 @@ class Config:
         )
         self.output_dir = os.getenv("OUTPUT_DIR", "outputs")
 
-        self.max_clips = int(os.getenv("MAX_CLIPS", "20"))
+        # Safety cap for discovery harvest (anti-abuse), not a product fill target.
+        self.max_clips = int(os.getenv("MAX_CLIPS", "60"))
         self.clip_duration = int(os.getenv("CLIP_DURATION", "30"))  # seconds
 
         self.temp_dir = os.getenv("TEMP_DIR", "temp")
@@ -156,9 +158,13 @@ class Config:
         self.discord_feedback_webhook_url = self._get_optional_env("DISCORD_FEEDBACK_WEBHOOK_URL")
         self.discord_sales_webhook_url = self._get_optional_env("DISCORD_SALES_WEBHOOK_URL")
         self.default_processing_mode = os.getenv("DEFAULT_PROCESSING_MODE", "fast")
-        self.fast_mode_max_clips = int(os.getenv("FAST_MODE_MAX_CLIPS", "20"))
+        self.fast_mode_max_clips = int(os.getenv("FAST_MODE_MAX_CLIPS", "60"))
         self.fast_mode_transcript_model = os.getenv(
             "FAST_MODE_TRANSCRIPT_MODEL", "universal"
+        )
+        # How many clips to ffmpeg-render at once (CPU-bound Contabo workers: 1–2).
+        self.clip_render_concurrency = max(
+            1, min(8, int(os.getenv("CLIP_RENDER_CONCURRENCY", "2")))
         )
         # Open clips with the AI-picked hook line as a short cold-open teaser.
         self.hook_first_teaser = self._get_bool_env("HOOK_FIRST_TEASER", True)
@@ -208,6 +214,7 @@ class Config:
     def as_runtime_settings(self) -> dict[str, str | None]:
         return {
             "ASSEMBLY_AI_API_KEY": self.assembly_ai_api_key,
+            "TRANSCRIPTION_PROVIDER": self.transcription_provider,
             "LLM": self.llm,
             "OPENAI_API_KEY": self.openai_api_key,
             "OPENROUTER_API_KEY": self.openrouter_api_key,

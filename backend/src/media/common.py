@@ -76,11 +76,12 @@ CLIP_START_LEAD_IN_SECONDS = 0.1
 
 SENTENCE_PAUSE_BOUNDARY_SECONDS = 0.8
 
-HOOK_TEASER_MIN_SECONDS = 1.5
+HOOK_TEASER_MIN_SECONDS = 1.2
 
-HOOK_TEASER_MAX_SECONDS = 5.0
+HOOK_TEASER_MAX_SECONDS = 5.5
 
-HOOK_TEASER_MIN_OFFSET_SECONDS = 3.0
+# Slightly below 3s so labeled mid-clip punchlines still qualify after word snap.
+HOOK_TEASER_MIN_OFFSET_SECONDS = 2.5
 
 # Long pauses are compressed rather than cut out, so speech keeps a natural
 # breath between phrases. A junction keeps PAUSE_EDGE_PADDING_SECONDS of silence

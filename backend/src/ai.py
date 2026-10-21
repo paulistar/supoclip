@@ -21,13 +21,16 @@ from pydantic_ai.models.openrouter import OpenRouterModel
 from pydantic_ai.profiles.openai import OpenAIModelProfile
 from pydantic_ai.providers.ollama import OllamaProvider
 from pydantic_ai.providers.openrouter import OpenRouterProvider
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, PrivateAttr, field_validator
 
 from .clip_selection import (
+    AUTO_RENDER_DEFAULT,
     CLIP_BRIEF_MAX_CHARS,
+    DEFAULT_DISCOVERY_SAFETY_CAP,
     ClipSelectionPrefs,
+    discovery_ceiling,
     parse_clip_selection_prefs,
-    resolve_clip_budget,
+    render_ceiling,
     window_segment_target,
 )
 from .config import Config, get_config
@@ -41,7 +44,7 @@ IDEAL_CLIP_MIN_SECONDS = 30
 IDEAL_CLIP_MAX_SECONDS = 90
 MIN_ACCEPTED_CLIP_SECONDS = 30
 MAX_ACCEPTED_CLIP_SECONDS = 120
-TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v10-hard-brief"
+TRANSCRIPT_ANALYSIS_CACHE_VERSION = "windowed-rerank-v11-quality-count"
 TRANSCRIPT_ANALYSIS_MAX_ATTEMPTS = 3
 TRANSCRIPT_ANALYSIS_TIMEOUT_SECONDS = 600
 # Long transcripts are analysed in overlapping windows so every part of the
@@ -50,7 +53,7 @@ ANALYSIS_WINDOW_SECONDS = 12 * 60
 ANALYSIS_WINDOW_OVERLAP_SECONDS = 2 * 60
 ANALYSIS_SINGLE_WINDOW_MAX_SECONDS = 15 * 60
 ANALYSIS_WINDOW_CONCURRENCY = 3
-ANALYSIS_WINDOW_SEGMENT_TARGET = "3-5"
+ANALYSIS_WINDOW_SEGMENT_TARGET = "4-7"
 # Wall-clock budget for all windows together. Each window additionally keeps
 # its own TRANSCRIPT_ANALYSIS_TIMEOUT_SECONDS budget once it starts running.
 ANALYSIS_TOTAL_TIMEOUT_SECONDS = 1800
@@ -59,14 +62,18 @@ CANDIDATE_DEDUPE_OVERLAP_RATIO = 0.5
 # How far a model timestamp may sit from a transcript line boundary and still be
 # snapped onto it instead of the whole clip being dropped.
 SEGMENT_SNAP_TOLERANCE_SECONDS = 8
-# Final clip count scales with source length: one clip per five minutes,
-# never fewer than the single-pass prompt's old maximum and never more than 20.
-MIN_FINAL_CLIPS = 5
-MAX_FINAL_CLIPS = 20
+# Discovery safety + quality gate (quantity Auto is quality-first, not pad-to-N).
+MIN_FINAL_CLIPS = 1
+MAX_FINAL_CLIPS = DEFAULT_DISCOVERY_SAFETY_CAP
 SECONDS_PER_FINAL_CLIP = 5 * 60
+QUALITY_GATE_MIN_TOTAL = 70
+QUALITY_GATE_MIN_HOOK = 16
+QUALITY_GATE_TOP_GAP = 15
+QUALITY_GATE_MIN_START_GAP_SECONDS = 45
 TRANSIENT_MODEL_STATUS_CODES = {408, 429, 500, 502, 503, 504, 529}
 HOOK_TITLE_MAX_CHARS = 64
 HOOK_TITLE_MAX_WORDS = 10
+HOOK_TITLE_REWRITE_TIMEOUT_SECONDS = 120
 # The transcript formatter does not wrap minutes into hours, so sources of 100+
 # minutes produce labels such as "100:05".
 TRANSCRIPT_SPAN_RE = re.compile(
@@ -321,6 +328,12 @@ class TranscriptAnalysis(BaseModel):
     broll_opportunities: Optional[List[BRollOpportunity]] = Field(
         default=None, description="Opportunities to insert B-roll footage"
     )
+    # Set post-analysis (not from the LLM). Excellent = gate-passed before render slice.
+    _excellent_clip_count: int = PrivateAttr(default=0)
+    _render_ceiling: int = PrivateAttr(default=AUTO_RENDER_DEFAULT)
+    _discovery_ceiling: int = PrivateAttr(default=MAX_FINAL_CLIPS)
+    _excellent_segments: List[TranscriptSegment] = PrivateAttr(default_factory=list)
+    _drop_log: List[Dict[str, Any]] = PrivateAttr(default_factory=list)
 
 
 # Enhanced system prompt with virality scoring and B-roll detection
@@ -469,7 +482,7 @@ SHORT-FORM RETENTION (WATCH + hook-writer) — apply to every segment, with or w
 - Retention pacing: prefer moments with idea/emotion shifts across the clip, not a single quotable line with dead air around it.
 - Watch-through over vanity: rank for un-skippable standalone retention (social + paid), not topic importance alone. Hard gate: if the opening cannot stop a scroll in ~3s, do not select the span.
 
-Find the number of compelling segments requested in the task that would work well as standalone clips. Prefer meeting the requested count with strong clips; do not pad with weak filler. Every selected segment must be accurate, self-contained, have proper time ranges, and score high on virality metrics."""
+Return only excellent, publishable standalone clips — never pad toward a count. If fewer excellent moments exist than the harvest range, return fewer. Every selected segment must be accurate, self-contained, have proper time ranges, and score high on virality metrics."""
 
 # Lazy-loaded agent to avoid import-time failures when API keys aren't set
 _transcript_agent: Optional[Agent[None, TranscriptAnalysis]] = None
@@ -543,6 +556,58 @@ def _openrouter_keys(runtime_config: Config) -> list[str]:
     return keys
 
 
+def _log_prompt_cache_usage(result: Any, *, label: str) -> None:
+    """Surface OpenRouter/Anthropic cache hits so we can track cost savings."""
+    usage = getattr(result, "usage", None)
+    if callable(usage):
+        try:
+            usage = usage()
+        except Exception:
+            usage = None
+    if usage is None:
+        return
+    cache_read = int(getattr(usage, "cache_read_tokens", 0) or 0)
+    cache_write = int(getattr(usage, "cache_write_tokens", 0) or 0)
+    if cache_read or cache_write:
+        logger.info(
+            "Prompt cache %s: read=%s write=%s input=%s output=%s",
+            label,
+            cache_read,
+            cache_write,
+            getattr(usage, "input_tokens", None),
+            getattr(usage, "output_tokens", None),
+        )
+
+
+class _OpenRouterCachedModel(OpenRouterModel):
+    """OpenRouter chat model that marks Anthropic system prompts for caching."""
+
+    async def _map_messages(self, messages, model_request_parameters):  # type: ignore[override]
+        openai_messages = await super()._map_messages(messages, model_request_parameters)
+        if not str(self.model_name).startswith("anthropic/"):
+            return openai_messages
+        mapped = []
+        for message in openai_messages:
+            role = message.get("role") if isinstance(message, dict) else None
+            content = message.get("content") if isinstance(message, dict) else None
+            if role == "system" and isinstance(content, str) and content.strip():
+                mapped.append(
+                    {
+                        **message,
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": content,
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                )
+            else:
+                mapped.append(message)
+        return mapped
+
+
 def _build_transcript_model(
     runtime_config: Config, model_name: str | None = None
 ) -> Model | str:
@@ -562,11 +627,13 @@ def _build_transcript_model(
             "openrouter_provider": {"allow_fallbacks": True, "require_parameters": True, "data_collection": "deny"},
             "openrouter_reasoning": {"effort": "low"},
             "max_tokens": 8192,
+            # Stable key so multi-window analysis reuses the same system prefix.
+            "openai_prompt_cache_key": f"supoclip:{TRANSCRIPT_ANALYSIS_CACHE_VERSION}",
         }
         # One model per key, in priority order. FallbackModel moves to the next
         # key on an API error (401/402/429 etc.), so a drained key never stops a job.
         models = [
-            OpenRouterModel(
+            _OpenRouterCachedModel(
                 provider_model_name,
                 provider=OpenRouterProvider(api_key=key),
                 profile=profile,
@@ -669,6 +736,83 @@ Rules:
 
 _rerank_agent: Optional[Agent[None, CandidateRanking]] = None
 _rerank_agent_signature: Optional[tuple[str | None, ...]] = None
+
+_hook_title_agent: Optional[Agent[None, "HookTitleBatch"]] = None
+_hook_title_agent_signature: Optional[tuple[str | None, ...]] = None
+
+
+class HookTitleItem(BaseModel):
+    """One rewritten on-screen headline for a final clip."""
+
+    segment_index: int = Field(description="0-based index into the segments list")
+    hook_title: str = Field(description="Punchy 3-9 word on-screen headline")
+
+
+class HookTitleBatch(BaseModel):
+    """Dedicated hook_title rewrite pass over final segments."""
+
+    titles: List[HookTitleItem] = Field(
+        description="One rewritten hook_title per segment_index"
+    )
+
+
+hook_title_rewrite_system_prompt = """You write short on-screen headlines for short-form video clips.
+
+Input: a list of final clip segments with transcript text and an optional draft title.
+Output: JSON only — {"titles":[{"segment_index":0,"hook_title":"..."}, ...]}.
+
+Formulas (pick the best fit per clip; stay in the transcript's language):
+1. Curiosity gap — incomplete but honest promise the clip pays off
+2. Stakes — risk, cost, consequence, or urgency grounded in the text
+3. Number / statistic — a concrete figure from the segment
+4. Contrast — before/after, myth vs reality, old vs new
+5. Direct question — only if the answer is inside the clip
+
+Hard rules:
+- 3-9 words, plain text, no hashtags, emojis, or surrounding quotes
+- Grounded only in the segment text — never invent facts or numbers
+- Anti-meta: NEVER write titles like "A pergunta sobre…", "O que você precisa saber sobre…",
+  "Por que isso importa", "The truth about…", "Everything you need to know…",
+  "Let's talk about…", "Uma reflexão sobre…", or topic labels that describe the category
+- Prefer a claim, number, stakes, or curiosity the scroll-stopper can feel in one glance
+- Sound human: short words, punchy rhythm; no corporate or academic phrasing
+- One title per segment_index; cover every index provided"""
+
+
+def get_hook_title_agent() -> Agent[None, HookTitleBatch]:
+    """Get or create the dedicated hook_title rewrite agent."""
+    global _hook_title_agent, _hook_title_agent_signature
+    runtime_config = get_config()
+    provider, _ = _split_llm_name(runtime_config.llm)
+    model_name = runtime_config.llm
+    signature = (
+        model_name,
+        runtime_config.openai_api_key,
+        *_openrouter_keys(runtime_config),
+        runtime_config.openrouter_fallback_model,
+        runtime_config.google_api_key,
+        runtime_config.anthropic_api_key,
+        runtime_config.ollama_base_url,
+        runtime_config.ollama_api_key,
+    )
+    if _hook_title_agent is None or _hook_title_agent_signature != signature:
+        apply_settings_to_process_env(runtime_config.as_runtime_settings())
+        config_error = _get_missing_llm_key_error(model_name, runtime_config)
+        if config_error:
+            raise RuntimeError(config_error)
+
+        _hook_title_agent = Agent[None, HookTitleBatch](
+            model=_build_transcript_model(runtime_config, model_name),
+            output_type=(
+                NativeOutput(HookTitleBatch, strict=True)
+                if provider == "openrouter"
+                else HookTitleBatch
+            ),
+            system_prompt=hook_title_rewrite_system_prompt,
+            output_retries=2,
+        )
+        _hook_title_agent_signature = signature
+    return _hook_title_agent
 
 
 def get_rerank_agent() -> Agent[None, CandidateRanking]:
@@ -807,10 +951,12 @@ Follow this workflow:
 3. Prefer moments with a strong hook, clear payoff, emotional charge, or concrete value.
 4. For each chosen segment, use the earliest timestamp in the selected range as start_time and the latest timestamp in the selected range as end_time.{broll_instruction}
 
-Selection target:
-- Choose {segment_target} segments total (aim to support a final budget near {budget} clips for the whole video).
+Selection target (quality-only):
+- Harvest up to {segment_target} excellent segments in this pass (discovery ceiling for the whole video ≈ {budget}).
+- Return ONLY publishable clips: strong ~3s opener, standalone, payoff, specific, shareable, and inside the brief.
+- Do NOT pad to hit a count. If only 2 excellent moments exist, return 2. Prefer empty over filler.
 {duration_guidance}
-- Skip weak standalone picks: intros, sponsor reads, CTAs, contextless quotes, repeated points, vague setup, and answer fragments that require prior context.
+- Skip weak standalone picks: intros, sponsor reads, CTAs, contextless quotes, repeated points, vague setup, greetings/warm-ups, and answer fragments that require prior context.
 - Before returning a segment, ask whether a viewer would understand and care without seeing the rest of the source video.
 - Do not start without a hook or end abruptly mid-idea when contiguous lines can complete the arc.
 {brief_section}
@@ -839,12 +985,40 @@ Transcript:
 {transcript}"""
 
 
+_META_HOOK_TITLE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:a|uma)\s+pergunta\s+sobre\b|"
+    r"o\s+que\s+voc[eê]\s+precisa\s+saber\s+sobre\b|"
+    r"por\s+que\s+isso\s+importa\b|"
+    r"uma\s+reflex[aã]o\s+sobre\b|"
+    r"vamos\s+falar\s+sobre\b|"
+    r"tudo\s+sobre\b|"
+    r"the\s+truth\s+about\b|"
+    r"everything\s+you\s+need\s+to\s+know\b|"
+    r"let'?s\s+talk\s+about\b|"
+    r"why\s+this\s+matters\b|"
+    r"a\s+(?:quick\s+)?(?:note|thought|look)\s+on\b|"
+    r"understanding\b|"
+    r"exploring\b|"
+    r"an\s+introduction\s+to\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_meta_hook_title(title: Optional[str]) -> bool:
+    """True when the title names the topic instead of making a scroll-stopping claim."""
+    if not title:
+        return True
+    return bool(_META_HOOK_TITLE_RE.search(title.strip()))
+
+
 def sanitize_hook_title(raw: Optional[str]) -> Optional[str]:
     """Normalize an AI-provided hook title for on-screen rendering.
 
     Strips wrapping quotes/markdown, collapses whitespace, drops hashtags, and
     trims to a word-boundary length cap. Returns None when nothing usable is
-    left so callers can simply skip the overlay.
+    left (including meta/topic-label titles) so callers can skip or rewrite.
     """
     if not raw:
         return None
@@ -855,6 +1029,8 @@ def sanitize_hook_title(raw: Optional[str]) -> Optional[str]:
     # Drop trailing sentence punctuation but keep ?/! (they carry the hook).
     title = title.rstrip(".,;:-–— ").strip()
     if not title:
+        return None
+    if is_meta_hook_title(title):
         return None
 
     words = title.split()
@@ -867,7 +1043,68 @@ def sanitize_hook_title(raw: Optional[str]) -> Optional[str]:
         title = (clipped[:cut] if cut > 20 else title[:HOOK_TITLE_MAX_CHARS]).rstrip(
             ".,;:-–— "
         )
-    return title or None
+    if not title or is_meta_hook_title(title):
+        return None
+    return title
+
+
+def build_hook_title_rewrite_prompt(segments: List[TranscriptSegment]) -> str:
+    blocks = []
+    for index, segment in enumerate(segments):
+        draft = segment.hook_title or "(none)"
+        text = (segment.text or "").strip()
+        if len(text) > 600:
+            text = text[:600].rstrip() + "…"
+        blocks.append(
+            f"segment_index: {index}\n"
+            f"time: {segment.start_time} - {segment.end_time}\n"
+            f"draft_title: {draft}\n"
+            f"text: {text}"
+        )
+    return (
+        f"Rewrite hook_title for these {len(segments)} final clips.\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+async def rewrite_hook_titles(
+    segments: List[TranscriptSegment],
+) -> List[TranscriptSegment]:
+    """Second LLM pass: claim/number/question headlines; drop meta drafts."""
+    if not segments:
+        return segments
+    try:
+        agent = get_hook_title_agent()
+        result = await asyncio.wait_for(
+            agent.run(build_hook_title_rewrite_prompt(segments)),
+            timeout=HOOK_TITLE_REWRITE_TIMEOUT_SECONDS,
+        )
+        batch = result.output
+    except Exception as exc:
+        logger.warning("Hook title rewrite failed; keeping drafts: %s", exc)
+        for segment in segments:
+            segment.hook_title = sanitize_hook_title(segment.hook_title)
+        return segments
+
+    by_index = {
+        item.segment_index: sanitize_hook_title(item.hook_title)
+        for item in (batch.titles or [])
+        if 0 <= item.segment_index < len(segments)
+    }
+    for index, segment in enumerate(segments):
+        rewritten = by_index.get(index)
+        if rewritten:
+            segment.hook_title = rewritten
+        else:
+            segment.hook_title = sanitize_hook_title(segment.hook_title)
+        logger.debug(
+            "Hook title [%s] %s-%s -> %r",
+            index,
+            segment.start_time,
+            segment.end_time,
+            segment.hook_title,
+        )
+    return segments
 
 
 def _sanitize_hook_span(
@@ -875,18 +1112,24 @@ def _sanitize_hook_span(
 ) -> None:
     """Drop a cold-open hook range that is malformed or outside the segment.
 
-    Word-level snapping and length checks happen at render time.
+    Requires the teaser to start ≥2s after the body open (already the opener
+    otherwise) and last 1–8s. Word-level snap happens at render time.
     """
     try:
         hook_start = _parse_transcript_timestamp_seconds(segment.hook_start_time or "")
         hook_end = _parse_transcript_timestamp_seconds(segment.hook_end_time or "")
     except ValueError:
         hook_start = hook_end = None
+    duration = (hook_end - hook_start) if hook_start is not None and hook_end is not None else None
     if (
         hook_start is None
         or hook_end is None
-        or not start_seconds < hook_start < hook_end <= end_seconds
-        or hook_end - hook_start > 8
+        or duration is None
+        or hook_start < start_seconds + 2
+        or hook_end > end_seconds
+        or hook_start >= hook_end
+        or duration < 1
+        or duration > 8
     ):
         segment.hook_start_time = None
         segment.hook_end_time = None
@@ -1096,6 +1339,7 @@ async def _run_transcript_analysis(
                     result = await agent.run(prompt)
                     if hasattr(result, "response"):
                         logger.info("AI analysis completed using model %s", result.response.model_name)
+                    _log_prompt_cache_usage(result, label="transcript-analysis")
                     return result
                 except Exception as error:
                     if not _is_transient_model_error(error):
@@ -1270,34 +1514,26 @@ def max_final_clips_for_duration(
     min_clips: int | None = None,
     duration_preset: str | None = None,
 ) -> int:
-    """Scale the clip budget with source length and optional selection prefs.
+    """Discovery ceiling: physical fit × server safety (not a fill-to-N target).
 
-    Without prefs, preserves the legacy density (~1 clip / 5 minutes, floor 5).
-    With prefs, uses preset-aware Auto density or an explicit min_clips floor,
-    clamped by physical fit and ``max_clips``.
+    With prefs, uses ``discovery_ceiling``. Without prefs, same physical/safety
+    clamp using the Auto duration preset. Render limit is applied separately.
     """
-    if prefs is not None or min_clips is not None or duration_preset is not None:
-        selection = prefs or parse_clip_selection_prefs(
-            duration_preset=duration_preset or "auto",
+    selection = prefs or parse_clip_selection_prefs(
+        duration_preset=duration_preset or "auto",
+        min_clips=min_clips,
+    )
+    if min_clips is not None and prefs is not None and prefs.min_clips is None:
+        selection = ClipSelectionPrefs(
+            duration_preset=selection.duration_preset,
             min_clips=min_clips,
+            brief=selection.brief,
         )
-        if min_clips is not None and prefs is not None and prefs.min_clips is None:
-            selection = ClipSelectionPrefs(
-                duration_preset=selection.duration_preset,
-                min_clips=min_clips,
-                brief=selection.brief,
-            )
-        return resolve_clip_budget(
-            source_seconds,
-            selection,
-            max_clips=max_clips,
-            absolute_ceiling=MAX_FINAL_CLIPS,
-        )
-
-    ceiling = max(1, min(MAX_FINAL_CLIPS, max_clips))
-    return max(
-        min(MIN_FINAL_CLIPS, ceiling),
-        min(ceiling, math.ceil(max(0.0, source_seconds) / SECONDS_PER_FINAL_CLIP)),
+    return discovery_ceiling(
+        source_seconds,
+        selection,
+        max_clips=max_clips,
+        absolute_ceiling=MAX_FINAL_CLIPS,
     )
 
 
@@ -1719,12 +1955,151 @@ def _segment_violates_brief(
     return False, None
 
 
+_WEAK_OPENER_RE = re.compile(
+    r"^\s*(?:"
+    r"ol[aá]\b|oi\b|e\s+a[ií]\b|fala\s+(?:galera|pessoal|gente)\b|"
+    r"ent[aã]o\s+pessoal\b|bem[- ]?vind[oa]s?\b|hoje\s+(?:eu\s+)?vou\b|"
+    r"nesse\s+v[ií]deo\b|neste\s+v[ií]deo\b|no\s+v[ií]deo\s+de\s+hoje\b|"
+    r"hey\s+(?:guys|everyone)\b|hello\s+everyone\b|welcome\s+back\b|"
+    r"so\s+(?:guys|folks)\b|today\s+(?:i'?m|we'?re)\s+going\s+to\b|"
+    r"in\s+this\s+video\b|alright\s+(?:so|guys)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _segment_total_score(segment: TranscriptSegment) -> int:
+    if segment.virality is None:
+        return 0
+    return int(segment.virality.total_score or 0)
+
+
+def _segment_hook_score(segment: TranscriptSegment) -> int:
+    if segment.virality is None:
+        return 0
+    return int(segment.virality.hook_score or 0)
+
+
+def _segment_has_weak_opener(segment: TranscriptSegment) -> bool:
+    text = (segment.text or "").strip()
+    if not text:
+        return True
+    # First ~3s proxy: opening clause / first ~12 words.
+    head = " ".join(text.split()[:12])
+    return bool(_WEAK_OPENER_RE.search(head))
+
+
+def apply_quality_gate(
+    candidates: List[TranscriptSegment],
+    *,
+    min_total: int = QUALITY_GATE_MIN_TOTAL,
+    min_hook: int = QUALITY_GATE_MIN_HOOK,
+    top_gap: int = QUALITY_GATE_TOP_GAP,
+    min_start_gap_seconds: int = QUALITY_GATE_MIN_START_GAP_SECONDS,
+    fallback_best: bool = True,
+) -> tuple[List[TranscriptSegment], List[Dict[str, Any]]]:
+    """Keep only excellent clips: absolute + relative scores, gap, weak-opener.
+
+    Returns ``(kept, drop_log)``. Soft fail: if nothing passes, keep the single
+    best candidate so the task is never empty.
+    """
+    if not candidates:
+        return [], []
+
+    ranked = sorted(
+        candidates,
+        key=lambda s: (_segment_total_score(s), _segment_hook_score(s), s.relevance_score),
+        reverse=True,
+    )
+    top_total = _segment_total_score(ranked[0])
+    floor_total = max(min_total, top_total - top_gap)
+
+    excellent: List[TranscriptSegment] = []
+    drop_log: List[Dict[str, Any]] = []
+    accepted_starts: List[int] = []
+
+    for segment in ranked:
+        total = _segment_total_score(segment)
+        hook = _segment_hook_score(segment)
+        try:
+            start_s = _parse_transcript_timestamp_seconds(segment.start_time)
+        except ValueError:
+            start_s = None
+
+        reason: Optional[str] = None
+        if total < min_total:
+            reason = "low_total"
+        elif hook < min_hook:
+            reason = "low_hook"
+        elif total < floor_total:
+            reason = "far_from_top"
+        elif _segment_has_weak_opener(segment):
+            reason = "weak_opener"
+        elif start_s is not None and any(
+            abs(start_s - prev) < min_start_gap_seconds for prev in accepted_starts
+        ):
+            reason = "too_close_in_time"
+
+        if reason:
+            drop_entry = {
+                "start_time": segment.start_time,
+                "end_time": segment.end_time,
+                "reason": reason,
+                "total_score": total,
+                "hook_score": hook,
+                "hook_title": segment.hook_title,
+            }
+            drop_log.append(drop_entry)
+            logger.info(
+                "Quality gate dropped %s-%s reason=%s total=%s hook=%s top=%s title=%r",
+                segment.start_time,
+                segment.end_time,
+                reason,
+                total,
+                hook,
+                top_total,
+                segment.hook_title,
+            )
+            continue
+
+        excellent.append(segment)
+        if start_s is not None:
+            accepted_starts.append(start_s)
+
+    if not excellent and fallback_best:
+        best = ranked[0]
+        logger.info(
+            "Quality gate empty — fallback to best segment %s-%s (total=%s)",
+            best.start_time,
+            best.end_time,
+            _segment_total_score(best),
+        )
+        return [best], drop_log
+
+    # Best-first for render slice / generate-more order.
+    excellent.sort(
+        key=lambda s: (_segment_total_score(s), _segment_hook_score(s), s.relevance_score),
+        reverse=True,
+    )
+    logger.info(
+        "Quality gate kept %s/%s excellent (min_total=%s min_hook=%s top=%s floor=%s drops=%s)",
+        len(excellent),
+        len(candidates),
+        min_total,
+        min_hook,
+        top_total,
+        floor_total,
+        len(drop_log),
+    )
+    return excellent, drop_log
+
+
 def _filter_segments_by_brief(
     candidates: List[TranscriptSegment],
     brief: str,
     clip_budget: int,
 ) -> List[TranscriptSegment]:
-    """Drop brief-forbidden segments and refill from next-best allowed candidates."""
+    """Drop brief-forbidden segments up to the discovery ceiling."""
     budget = max(0, int(clip_budget))
     if budget <= 0:
         return []
@@ -1739,7 +2114,7 @@ def _filter_segments_by_brief(
         if violates:
             dropped += 1
             logger.info(
-                "Brief filter dropped segment %s-%s (phrase=%r, hook_title=%r)",
+                "Brief filter dropped segment %s-%s reason=brief (phrase=%r, hook_title=%r)",
                 segment.start_time,
                 segment.end_time,
                 phrase,
@@ -1752,7 +2127,7 @@ def _filter_segments_by_brief(
 
     if dropped:
         logger.info(
-            "Brief filter removed %s segment(s); kept %s of budget %s (phrases=%s)",
+            "Brief filter removed %s segment(s); kept %s of discovery ceiling %s (phrases=%s)",
             dropped,
             len(kept),
             budget,
@@ -1803,11 +2178,13 @@ async def get_most_relevant_parts_by_transcript(
         source_seconds = max(
             (line["end_seconds"] for line in transcript_lines), default=0
         )
-        clip_budget = max_final_clips_for_duration(
+        server_max = get_config().max_clips
+        harvest_ceiling = max_final_clips_for_duration(
             source_seconds,
-            get_config().max_clips,
+            server_max,
             prefs=selection,
         )
+        render_limit = render_ceiling(selection, discovery=harvest_ceiling)
 
         if len(windows) == 1:
             result = await _run_transcript_analysis(
@@ -1817,7 +2194,7 @@ async def get_most_relevant_parts_by_transcript(
                     include_broll=include_broll,
                     clip_signals=clip_signals,
                     prefs=selection,
-                    clip_budget=clip_budget,
+                    clip_budget=harvest_ceiling,
                 )
             )
             analyses = [result.output]
@@ -1829,7 +2206,7 @@ async def get_most_relevant_parts_by_transcript(
                 include_broll,
                 clip_signals,
                 prefs=selection,
-                clip_budget=clip_budget,
+                clip_budget=harvest_ceiling,
             )
 
         candidates: List[TranscriptSegment] = []
@@ -1852,11 +2229,38 @@ async def get_most_relevant_parts_by_transcript(
         if len(windows) > 1:
             candidates = await rerank_candidates(candidates)
 
-        validated_segments = _filter_segments_by_brief(
+        brief_filtered = _filter_segments_by_brief(
             candidates,
             selection.brief,
-            clip_budget,
+            harvest_ceiling,
         )
+        # Brief drops are also recorded for calibration.
+        brief_phrases = _extract_forbidden_phrases(selection.brief)
+        brief_drop_log: List[Dict[str, Any]] = []
+        if brief_phrases:
+            kept_ids = {id(s) for s in brief_filtered}
+            for segment in candidates:
+                if id(segment) in kept_ids:
+                    continue
+                violates, phrase = _segment_violates_brief(segment, brief_phrases)
+                if violates:
+                    brief_drop_log.append(
+                        {
+                            "start_time": segment.start_time,
+                            "end_time": segment.end_time,
+                            "reason": "brief",
+                            "phrase": phrase,
+                            "total_score": _segment_total_score(segment),
+                            "hook_score": _segment_hook_score(segment),
+                            "hook_title": segment.hook_title,
+                        }
+                    )
+
+        excellent_segments, gate_drop_log = apply_quality_gate(brief_filtered)
+        excellent_segments = await rewrite_hook_titles(excellent_segments)
+        excellent_count = len(excellent_segments)
+        validated_segments = excellent_segments[:render_limit]
+        drop_log = brief_drop_log + gate_drop_log
 
         broll_opportunities = None
         if include_broll:
@@ -1874,8 +2278,20 @@ async def get_most_relevant_parts_by_transcript(
             key_topics=_merge_key_topics(analyses),
             broll_opportunities=broll_opportunities,
         )
+        final_analysis._excellent_clip_count = excellent_count
+        final_analysis._render_ceiling = render_limit
+        final_analysis._discovery_ceiling = harvest_ceiling
+        final_analysis._excellent_segments = excellent_segments
+        final_analysis._drop_log = drop_log
 
-        logger.info(f"Selected {len(validated_segments)} segments for processing")
+        logger.info(
+            "Selected %s/%s excellent for render (discovery=%s render_ceiling=%s drops=%s)",
+            len(validated_segments),
+            excellent_count,
+            harvest_ceiling,
+            render_limit,
+            len(drop_log),
+        )
         if validated_segments:
             top = validated_segments[0]
             logger.info(

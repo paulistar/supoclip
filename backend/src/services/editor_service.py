@@ -137,13 +137,24 @@ async def prepare_editor(ctx, task_id: str, clip_id: str, filename: str):
             ranges = service._get_clip_source_ranges(clip)
             source_url, source_type = task.get("source_url"), task.get("source_type")
             mode = task.get("processing_mode") or service.config.default_processing_mode
+            source_settings = await service._load_task_source_settings(task_id)
+            try:
+                from ..clip_selection import ClipSelectionPrefs, parse_clip_selection_prefs
+
+                clip_prefs = parse_clip_selection_prefs(source_settings)
+            except Exception:
+                from ..clip_selection import ClipSelectionPrefs
+
+                clip_prefs = ClipSelectionPrefs()
             cache = await service.cache_repo.get_cache(
-                db, service._build_cache_key(source_url, source_type, mode)
+                db,
+                service._build_cache_key(
+                    source_url, source_type, mode, prefs=clip_prefs
+                ),
             )
             source = (
                 Path(cache["video_path"]) if cache and cache.get("video_path") else None
             )
-            source_settings = await service._load_task_source_settings(task_id)
             caption_settings = load_clip_caption_settings(Path(clip["file_path"])) or {}
             await db.close()
             if not source or not source.exists():

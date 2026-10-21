@@ -21,6 +21,7 @@ from ..clip_editor import (
 from ..video_utils import VALID_OUTPUT_FORMATS, parse_timestamp_to_seconds, create_optimized_clip
 from ..utils.async_helpers import run_in_thread
 from ..clip_cleanup import normalize_clip_cleanup_settings
+from ..clip_selection import ClipSelectionPrefs, parse_clip_selection_prefs
 from ..clip_source_map import (
     load_clip_source_ranges,
     save_clip_source_ranges,
@@ -421,9 +422,17 @@ class ClipEditingMixin:
             task.get("processing_mode") or self.config.default_processing_mode
         )
         if source_url and source_type:
+            try:
+                clip_prefs = parse_clip_selection_prefs(
+                    await self.task_repo.load_source_metadata(self.db, task_id)
+                )
+            except Exception:
+                clip_prefs = ClipSelectionPrefs()
             cache_entry = await self.cache_repo.get_cache(
                 self.db,
-                self._build_cache_key(source_url, source_type, processing_mode),
+                self._build_cache_key(
+                    source_url, source_type, processing_mode, prefs=clip_prefs
+                ),
             )
             cached_video_path = cache_entry.get("video_path") if cache_entry else None
             if cached_video_path:
@@ -577,9 +586,39 @@ class ClipEditingMixin:
         if not isinstance(add_subtitles, bool):
             add_subtitles = defaults["add_subtitles"]
 
+        try:
+            clip_prefs = parse_clip_selection_prefs(parsed)
+        except Exception:
+            clip_prefs = ClipSelectionPrefs()
+
+        drop_log = parsed.get("drop_log") if isinstance(parsed.get("drop_log"), list) else []
+        drop_counts: Dict[str, int] = {}
+        for entry in drop_log:
+            reason = str((entry or {}).get("reason") or "unknown")
+            drop_counts[reason] = drop_counts.get(reason, 0) + 1
+
         return {
             "output_format": output_format,
             "add_subtitles": add_subtitles,
+            "clip_duration_preset": clip_prefs.duration_preset,
+            "min_clips": clip_prefs.min_clips if clip_prefs.min_clips is not None else "auto",
+            "clip_brief": clip_prefs.brief,
+            "excellent_clip_count": parsed.get("excellent_clip_count"),
+            "rendered_clip_count": parsed.get("rendered_clip_count"),
+            "render_ceiling": parsed.get("render_ceiling"),
+            "review_before_render": bool(parsed.get("review_before_render")),
+            "skipped_starts": list(parsed.get("skipped_starts") or []),
+            "eta_seconds_total": parsed.get("eta_seconds_total"),
+            "drop_counts": drop_counts,
+            "remaining_excellent": (
+                max(
+                    0,
+                    int(parsed.get("excellent_clip_count") or 0)
+                    - int(parsed.get("rendered_clip_count") or 0),
+                )
+                if parsed.get("excellent_clip_count") is not None
+                else None
+            ),
             **normalize_clip_cleanup_settings(
                 parsed.get("cut_long_pauses"),
                 parsed.get("pause_threshold_ms"),

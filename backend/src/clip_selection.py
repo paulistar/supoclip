@@ -17,8 +17,12 @@ VALID_DURATION_PRESETS = (
     "podcast",
 )
 VALID_MIN_CLIPS = (5, 10, 15, 20)
+# Auto quantity: no fill-to-N. Render at most this many excellent clips.
+AUTO_RENDER_DEFAULT = 15
+# Server safety cap for discovery (not a product target). Env MAX_CLIPS may be lower.
+DEFAULT_DISCOVERY_SAFETY_CAP = 60
 
-# Spacing multiplies ideal midpoint for Auto quantity density.
+# Spacing multiplies ideal midpoint for legacy density estimates / UI hints.
 # Longer formats leave more room between clips.
 DURATION_PRESETS: dict[str, dict[str, Any]] = {
     "auto": {
@@ -152,11 +156,11 @@ def normalize_duration_preset(raw: Any) -> str:
 
 
 def normalize_min_clips(raw: Any, *, strict: bool = True) -> int | None:
-    """Return an explicit minimum clip count, or None for Auto.
+    """Return an explicit render ceiling (Até N), or None for Auto.
 
     ``strict=True`` (API input) only allows the UI choices 5/10/15/20.
-    ``strict=False`` (stored metadata) allows any positive int up to 20 after
-    physical clamping on create.
+    ``strict=False`` (stored metadata) allows any positive int up to the
+    discovery safety cap after physical clamping on create.
     """
     if raw is None or raw == "" or raw == "auto":
         return None
@@ -168,8 +172,10 @@ def normalize_min_clips(raw: Any, *, strict: bool = True) -> int | None:
         raise ValueError("min_clips must be auto or one of 5, 10, 15, 20") from exc
     if strict and value not in VALID_MIN_CLIPS:
         raise ValueError("min_clips must be auto or one of 5, 10, 15, 20")
-    if not strict and not 1 <= value <= 20:
-        raise ValueError("min_clips must be between 1 and 20")
+    if not strict and not 1 <= value <= DEFAULT_DISCOVERY_SAFETY_CAP:
+        raise ValueError(
+            f"min_clips must be between 1 and {DEFAULT_DISCOVERY_SAFETY_CAP}"
+        )
     return value
 
 
@@ -209,25 +215,48 @@ def physical_max_clips(source_seconds: float, prefs: ClipSelectionPrefs) -> int:
     return max(1, int(source_seconds // prefs.min_seconds))
 
 
+def discovery_ceiling(
+    source_seconds: float,
+    prefs: ClipSelectionPrefs,
+    *,
+    max_clips: int,
+    absolute_ceiling: int = DEFAULT_DISCOVERY_SAFETY_CAP,
+) -> int:
+    """Upper bound on how many excellent clips we may harvest (not a fill target)."""
+    return max(
+        1,
+        min(
+            absolute_ceiling,
+            max_clips,
+            physical_max_clips(source_seconds, prefs),
+        ),
+    )
+
+
+def render_ceiling(
+    prefs: ClipSelectionPrefs,
+    *,
+    discovery: int,
+    auto_default: int = AUTO_RENDER_DEFAULT,
+) -> int:
+    """How many excellent clips to render (CPU cost). Explicit Até N or Auto default."""
+    discovery = max(1, discovery)
+    if prefs.min_clips is not None:
+        return max(1, min(discovery, prefs.min_clips))
+    return max(1, min(discovery, auto_default))
+
+
 def auto_clip_count(source_seconds: float, prefs: ClipSelectionPrefs, ceiling: int) -> int:
-    """Density-aware Auto quantity for the selected duration preset."""
+    """Legacy density estimate — kept for tests/hints; Auto quantity no longer pads to this."""
     ceiling = max(1, ceiling)
     if source_seconds <= 0:
-        return min(5, ceiling)
-    # Keep the historical ~1 clip / 5 minutes for the Auto duration preset so
-    # Auto/Auto stays close to prior behavior; other presets use ideal spacing.
+        return min(1, ceiling)
     if prefs.duration_preset == "auto":
         step = 5 * 60
-        floor = min(5, ceiling)
     else:
         step = max(prefs.min_seconds, prefs.ideal_mid * prefs.spacing)
-        floor = (
-            1
-            if prefs.duration_preset in {"viral", "monetization", "podcast"}
-            else min(5, ceiling)
-        )
     estimated = ceil(max(0.0, source_seconds) / step)
-    return max(floor, min(ceiling, estimated))
+    return max(1, min(ceiling, estimated))
 
 
 def resolve_clip_budget(
@@ -235,12 +264,16 @@ def resolve_clip_budget(
     prefs: ClipSelectionPrefs,
     *,
     max_clips: int,
-    absolute_ceiling: int = 20,
+    absolute_ceiling: int = DEFAULT_DISCOVERY_SAFETY_CAP,
 ) -> int:
-    ceiling = max(1, min(absolute_ceiling, max_clips, physical_max_clips(source_seconds, prefs)))
-    if prefs.min_clips is not None:
-        return max(1, min(ceiling, prefs.min_clips))
-    return auto_clip_count(source_seconds, prefs, ceiling)
+    """Render ceiling for this run (Até N or Auto default), clamped by discovery."""
+    discovery = discovery_ceiling(
+        source_seconds,
+        prefs,
+        max_clips=max_clips,
+        absolute_ceiling=absolute_ceiling,
+    )
+    return render_ceiling(prefs, discovery=discovery)
 
 
 def preset_is_feasible(source_seconds: float | None, prefs: ClipSelectionPrefs) -> bool:
@@ -250,14 +283,18 @@ def preset_is_feasible(source_seconds: float | None, prefs: ClipSelectionPrefs) 
 
 
 def window_segment_target(clip_budget: int, *, windowed: bool) -> str:
-    """How many candidates to ask the model for in one analysis pass/window."""
+    """How many excellent candidates to ask for in one analysis pass/window.
+
+    ``clip_budget`` is the discovery ceiling — harvest enough for the gate/rerank,
+    without asking the model to pad to a quota.
+    """
     if not windowed:
-        low = max(2, min(5, clip_budget))
-        high = max(low, min(8, max(clip_budget, low + 1)))
+        low = max(3, min(6, clip_budget))
+        high = max(low, min(10, max(clip_budget, low + 2)))
         return f"{low}-{high}"
-    # Windowed: ask for enough local candidates so the global rerank can fill budget.
-    per_window = max(3, min(8, ceil(clip_budget / 2)))
-    return f"{per_window}-{per_window + 2}"
+    # Windowed: harvest local excellents so global gate/rerank has material.
+    per_window = max(4, min(10, ceil(clip_budget / 3) + 2))
+    return f"{per_window}-{per_window + 3}"
 
 
 def suggested_min_clips_for_preset(duration_preset: str) -> int | None:

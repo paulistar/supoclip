@@ -1,0 +1,42 @@
+[
+  {
+    "id": "strong_hooks_pt",
+    "brief": "",
+    "transcript": "[00:00 - 00:08] Olá pessoal, bem-vindos ao vídeo de hoje.\n[00:08 - 00:18] Então vamos começar com uma introdução longa.\n[02:00 - 02:12] Eu perdi R$40 mil em um único erro de precificação.\n[02:12 - 02:40] O cliente pediu desconto, eu aceitei sem margem, e o projeto virou prejuízo em três semanas.\n[02:40 - 03:05] A regra que me salvou depois: nunca negociar preço antes de travar o escopo.\n[08:00 - 08:20] Inscreva-se no canal e deixe o like se gostou.\n[12:00 - 12:18] Ninguém te conta que funil sem oferta clara só queima mídia.\n[12:18 - 12:50] Eu testei três ângulos; só o que falava o preço no primeiro gancho converteu o dobro.\n[12:50 - 13:10] Se o anúncio esconde o preço, o lead chega bravo e o closer perde tempo.",
+    "labels": [
+      {"start": "00:00", "end": "00:18", "expect": "drop", "reason": "weak_opener_greeting"},
+      {"start": "02:00", "end": "03:05", "expect": "keep", "reason": "number_stakes_payoff"},
+      {"start": "08:00", "end": "08:20", "expect": "drop", "reason": "cta_filler"},
+      {"start": "12:00", "end": "13:10", "expect": "keep", "reason": "contrarian_specific"}
+    ]
+  },
+  {
+    "id": "brief_balde_skip",
+    "brief": "Clips para redes. EVITAR topicos ja editados: Nao adianta aumentar o balde; Sua rotina e o adubo dos genes",
+    "transcript": "[05:00 - 05:20] Não adianta aumentar o balde se a torneira está fechada.\n[05:20 - 05:50] Você precisa primeiro abrir a demanda antes de escalar o time.\n[20:00 - 20:25] O desejo do cliente define o ângulo do anúncio, não o ego do criativo.\n[20:25 - 20:55] Quando eu mudei o gancho para a dor real, o CPA caiu 37% em sete dias.",
+    "labels": [
+      {"start": "05:00", "end": "05:50", "expect": "drop", "reason": "brief_balde"},
+      {"start": "20:00", "end": "20:55", "expect": "keep", "reason": "allowed_angle"}
+    ]
+  },
+  {
+    "id": "near_duplicate_gap",
+    "brief": "",
+    "transcript": "[30:00 - 30:20] Três métricas matam qualquer campanha: CTR baixo, CPM alto e oferta fraca.\n[30:20 - 30:50] Sem oferta, criativo bom só adianta o prejuízo.\n[30:40 - 31:10] Repito: oferta fraca mata campanha mesmo com CTR bonito.\n[45:00 - 45:25] Eu demiti o funil de 12 etapas e fechei em três.\n[45:25 - 45:55] Menos atrito, mais resposta — o lead chega quente e o closer fecha no mesmo dia.",
+    "labels": [
+      {"start": "30:00", "end": "30:50", "expect": "keep", "reason": "primary_block"},
+      {"start": "30:40", "end": "31:10", "expect": "drop", "reason": "too_close_in_time"},
+      {"start": "45:00", "end": "45:55", "expect": "keep", "reason": "distant_second"}
+    ]
+  },
+  {
+    "id": "meta_title_vs_claim",
+    "brief": "",
+    "transcript": "[01:00 - 01:30] Se você sobe orçamento sem corrigir a oferta, só acelera o prejuízo.\n[01:30 - 02:00] Eu vi isso em cinco contas: o CPA sobe na mesma proporção do budget.",
+    "labels": [
+      {"start": "01:00", "end": "02:00", "expect": "keep", "reason": "claim_ready"},
+      {"meta_title": "A pergunta sobre escala de mídia", "expect": "drop_title", "reason": "meta_headline"},
+      {"claim_title": "Escalar budget sem oferta queima caixa", "expect": "keep_title", "reason": "claim_headline"}
+    ]
+  }
+]

@@ -132,9 +132,22 @@ claude mcp add supoclip -e SUPOCLIP_API_KEY=sk_your_key_here \
   -- uv --directory /absolute/path/to/supoclip/mcp run supoclip-mcp
 ```
 
+## Create-task prefs (parity with the web app)
+
+`supoclip_create_clip_task` accepts the same clip-selection fields as `POST /tasks/`:
+
+| Arg | Values | Notes |
+|-----|--------|-------|
+| `clip_duration_preset` | `auto` `short` `long` `viral` `monetization` `podcast` | Duration band |
+| `min_clips` | `auto` / `5` / `10` / `15` / `20` | Render ceiling (“Até N”); `auto` = quality gate |
+| `clip_brief` | free text | HARD NEVER / EVITAR constraints |
+| `review_before_render` | bool | Pause after analysis for manual pick |
+| `processing_mode` | `fast` `balanced` `quality` | STT + discovery ceiling |
+
 ## Example prompts
 
 - "Use supoclip to make clips from https://youtu.be/… with the hormozi caption template, then wait for it and download the top clip."
+- "Create clips from this URL with preset short, Até 10, brief EVITAR: balde, and review_before_render true."
 - "List my recent supoclip tasks and show the virality scores of the latest one's clips."
 - "Export clip <id> from task <id> as a TikTok preset."
 

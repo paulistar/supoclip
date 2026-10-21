@@ -483,6 +483,17 @@ export default function SettingsPage() {
           <ChevronRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
         </Link>
 
+        {Boolean((session.user as { is_admin?: boolean }).is_admin) && (
+          <Link href="/admin" className="group flex items-center gap-4 rounded-2xl border bg-background p-5 transition-colors hover:border-foreground/25">
+            <span className="flex size-9 items-center justify-center rounded-lg bg-muted"><Bot className="size-4" /></span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold">STT &amp; LLM (admin)</span>
+              <span className="block text-xs text-muted-foreground">Provider de transcrição, modelo LLM e chaves do pipeline</span>
+            </span>
+            <ChevronRight className="size-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+          </Link>
+        )}
+
         <Link href="/settings/creator-program" className="group flex items-center gap-4 rounded-2xl border bg-background p-5 transition-colors hover:border-foreground/25">
           <span className="flex size-9 items-center justify-center rounded-lg bg-muted"><Megaphone className="size-4" /></span>
           <span className="min-w-0 flex-1">

@@ -2,8 +2,10 @@ import { cn } from "@/lib/utils";
 
 export const ACTIVE_TASK_STATUSES = ["queued", "processing"];
 export const RESUMABLE_TASK_STATUSES = ["cancelled", "error"];
+export const REVIEWABLE_TASK_STATUSES = ["awaiting_review", "completed"];
 const styles: Record<string, [string, string]> = {
   completed: ["Completed", "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"],
+  awaiting_review: ["Revisar", "bg-violet-500/10 text-violet-700 dark:text-violet-400"],
   processing: ["Processing", "bg-sky-500/10 text-sky-700 dark:text-sky-400"],
   queued: ["Queued", "bg-amber-500/10 text-amber-700 dark:text-amber-400"],
   error: ["Failed", "bg-red-500/10 text-red-700 dark:text-red-400"],

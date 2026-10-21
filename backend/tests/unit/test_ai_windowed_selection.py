@@ -18,14 +18,19 @@ def _transcript(total_seconds: int, line_seconds: int = 10) -> str:
     )
 
 
-def _segment(start: str, end: str, total: int = 60, text: str = "Some useful words here.") -> ai.TranscriptSegment:
+def _segment(
+    start: str,
+    end: str,
+    total: int = 84,
+    text: str = "Concrete claim with a sharp payoff here.",
+) -> ai.TranscriptSegment:
     quarter = total // 4
     return ai.TranscriptSegment(
         start_time=start,
         end_time=end,
         text=text,
         virality=ai.ViralityAnalysis(
-            hook_score=quarter,
+            hook_score=max(quarter, 18),
             engagement_score=quarter,
             value_score=quarter,
             shareability_score=total - 3 * quarter,
@@ -114,14 +119,14 @@ def test_repaired_bounds_past_an_hour_snap_back_to_transcript_labels():
     transcript = _transcript(70 * 60)
     lines = ai._parse_transcript_lines(transcript)
     spans = ai._parse_transcript_spans(transcript)
-    # 90 seconds is too long; repair trims it and must keep MM:SS labels.
-    segment = _segment("65:00", "66:30")
+    # 3 minutes exceeds Auto max (120s); repair trims and must keep MM:SS labels.
+    segment = _segment("65:00", "68:00")
 
     validated = ai._validate_segments([segment], lines, spans)
 
     assert len(validated) == 1
     assert validated[0].start_time == "65:00"
-    assert ai._parse_transcript_timestamp_seconds(validated[0].end_time) <= 65 * 60 + 60
+    assert ai._parse_transcript_timestamp_seconds(validated[0].end_time) <= 65 * 60 + 120
     assert ":" in validated[0].end_time and validated[0].end_time.count(":") == 1
 
 
@@ -144,7 +149,14 @@ def test_dedupe_keeps_lightly_overlapping_candidates():
 
 @pytest.mark.parametrize(
     ("seconds", "expected"),
-    [(5 * 60, 5), (20 * 60, 5), (45 * 60, 9), (90 * 60, 18), (200 * 60, 20)],
+    [
+        # Discovery = min(physical_max @ 30s, MAX_FINAL_CLIPS=60)
+        (5 * 60, 10),
+        (20 * 60, 40),
+        (45 * 60, 60),
+        (90 * 60, 60),
+        (200 * 60, 60),
+    ],
 )
 def test_final_clip_cap_scales_with_source_length(seconds, expected):
     assert ai.max_final_clips_for_duration(seconds) == expected
@@ -194,7 +206,7 @@ async def test_long_transcript_runs_windows_then_reranks(monkeypatch):
         start = 600 if "[10:00 - 10:10]" in prompt.split("Transcript:")[1].splitlines()[1] else 0
         if "[20:00 - 20:10]" in prompt.split("Transcript:")[1].splitlines()[1]:
             start = 1200
-        segments = [_segment(_label(start + 30), _label(start + 60), total=60 + start // 60)]
+        segments = [_segment(_label(start + 30), _label(start + 60), total=80 + start // 60)]
         if start in (0, 600):
             segments.append(_segment("10:30", "11:00", total=40))
         return SimpleNamespace(output=ai.TranscriptAnalysis(
@@ -209,12 +221,16 @@ async def test_long_transcript_runs_windows_then_reranks(monkeypatch):
     )))
     monkeypatch.setattr(ai, "get_transcript_agent", lambda: agent)
     monkeypatch.setattr(ai, "get_rerank_agent", lambda: rerank_agent)
+    monkeypatch.setattr(ai, "rewrite_hook_titles", AsyncMock(side_effect=lambda segs: segs))
 
     result = await ai.get_most_relevant_parts_by_transcript(transcript)
 
     assert agent.run.await_count == 3
     prompts = [call.args[0] for call in agent.run.await_args_list]
-    assert all("one window" in prompt and "Choose 3-5 segments total." in prompt for prompt in prompts)
+    assert all(
+        "one window" in prompt and "quality-only" in prompt and "Do NOT pad" in prompt
+        for prompt in prompts
+    )
     rerank_agent.run.assert_awaited_once()
     starts = [s.start_time for s in result.most_relevant_segments]
     assert sorted(starts) == ["00:30", "10:30", "20:30"]
@@ -238,6 +254,7 @@ async def test_window_failures_are_tolerated_when_another_window_succeeds(monkey
 
     monkeypatch.setattr(ai, "get_transcript_agent", lambda: SimpleNamespace(run=AsyncMock(side_effect=flaky)))
     monkeypatch.setattr(ai, "get_rerank_agent", lambda: (_ for _ in ()).throw(RuntimeError("no key")))
+    monkeypatch.setattr(ai, "rewrite_hook_titles", AsyncMock(side_effect=lambda segs: segs))
 
     result = await ai.get_most_relevant_parts_by_transcript(transcript)
 
@@ -268,29 +285,31 @@ async def test_hook_times_survive_windowing_snapping_and_rerank(monkeypatch):
         first_line = prompt.split("Transcript:")[1].splitlines()[1]
         if first_line.startswith("[00:00"):
             # Near-miss bounds snap to 00:30-01:00; the hook stays inside.
-            segment = _segment("00:31", "00:58", total=60)
+            segment = _segment("00:31", "00:58", total=82)
             segment.hook_start_time, segment.hook_end_time = "00:45", "00:49"
         elif first_line.startswith("[10:00"):
             # The hook falls outside the final span, so it must be cleared.
-            segment = _segment("12:00", "12:30", total=70)
+            segment = _segment("12:00", "12:30", total=86)
             segment.hook_start_time, segment.hook_end_time = "12:40", "12:44"
         else:
-            segment = _segment("20:30", "21:00", total=80)
+            segment = _segment("20:30", "21:00", total=90)
             segment.hook_start_time, segment.hook_end_time = "20:50", "20:54"
         return SimpleNamespace(output=ai.TranscriptAnalysis(
             most_relevant_segments=[segment], summary="s", key_topics=[],
         ))
 
+    # Keep all three inside the relative gate band (top − 15).
     rerank_agent = SimpleNamespace(run=AsyncMock(return_value=SimpleNamespace(
         output=ai.CandidateRanking(ranking=[
             ai.RankedCandidate(candidate_id=2, score=95),
-            ai.RankedCandidate(candidate_id=1, score=85),
-            ai.RankedCandidate(candidate_id=0, score=75),
+            ai.RankedCandidate(candidate_id=1, score=88),
+            ai.RankedCandidate(candidate_id=0, score=85),
         ])
     )))
     agent = SimpleNamespace(run=AsyncMock(side_effect=window_analysis))
     monkeypatch.setattr(ai, "get_transcript_agent", lambda: agent)
     monkeypatch.setattr(ai, "get_rerank_agent", lambda: rerank_agent)
+    monkeypatch.setattr(ai, "rewrite_hook_titles", AsyncMock(side_effect=lambda segs: segs))
 
     result = await ai.get_most_relevant_parts_by_transcript(transcript)
 
@@ -304,7 +323,13 @@ async def test_hook_times_survive_windowing_snapping_and_rerank(monkeypatch):
 
 @pytest.mark.parametrize(
     ("seconds", "max_clips", "expected"),
-    [(5 * 60, 10, 5), (45 * 60, 10, 9), (90 * 60, 10, 10), (200 * 60, 10, 10), (90 * 60, 3, 3)],
+    [
+        (5 * 60, 10, 10),
+        (45 * 60, 10, 10),
+        (90 * 60, 10, 10),
+        (200 * 60, 10, 10),
+        (90 * 60, 3, 3),
+    ],
 )
 def test_final_clip_cap_respects_max_clips(seconds, max_clips, expected):
     assert ai.max_final_clips_for_duration(seconds, max_clips) == expected
