@@ -676,3 +676,71 @@ async def test_legacy_queue_reservations_keep_full_arq_retention_window(age_hour
     service.task_repo.load_source_metadata = AsyncMock(return_value={})
     task = {"id": "legacy", "created_at": datetime.now(timezone.utc) - timedelta(hours=age_hours)}
     assert await service._queued_job_is_missing(task) is missing
+
+
+@pytest.mark.asyncio
+async def test_generate_more_claims_queued_before_progress_updates(tmp_path, monkeypatch):
+    """Regression: render-selected used to TaskCancelled when still queued.
+
+    Enqueue leaves status=queued. The first status write must accept queued→processing;
+    previously update_progress only allowed processing/awaiting_review and cancelled
+    the job in <100ms.
+    """
+    import json
+
+    service = build_task_service()
+    video = tmp_path / "source.mp4"
+    video.write_bytes(b"fake")
+    analysis = {
+        "excellent_segments": [
+            {
+                "start_time": "01:00",
+                "end_time": "02:00",
+                "text": "hook",
+                "title": "Clip A",
+                "virality_score": 90,
+            }
+        ],
+        "excellent_clip_count": 1,
+    }
+    service.cache_repo.get_cache = AsyncMock(
+        return_value={
+            "analysis_json": json.dumps(analysis),
+            "video_path": str(video),
+        }
+    )
+    service.clip_repo.get_clips_by_task = AsyncMock(return_value=[])
+    service.task_repo.save_source_metadata = AsyncMock()
+    service.task_repo.update_task_status = AsyncMock(return_value=True)
+    service._render_segments_concurrent = AsyncMock(return_value=["clip-1"])
+
+    result = await service._generate_more_clips(
+        task_id="task-1",
+        url="https://www.youtube.com/watch?v=demo",
+        source_type="youtube",
+        processing_mode="fast",
+        count=1,
+        mode="selected",
+        start_times=["01:00"],
+        font_family=None,
+        font_size=None,
+        font_color=None,
+        caption_template="default",
+        output_format="vertical",
+        add_subtitles=True,
+        cleanup_settings=None,
+        progress_callback=AsyncMock(),
+        should_cancel=AsyncMock(return_value=False),
+        clip_ready_callback=None,
+        source_metadata={"review_before_render": True},
+    )
+
+    assert result["added"] == 1
+    first_status = service.task_repo.update_task_status.await_args_list[0]
+    assert first_status.args[2] == "processing"
+    assert first_status.kwargs["expected_statuses"] == [
+        "queued",
+        "processing",
+        "awaiting_review",
+    ]
+    assert first_status.kwargs["progress"] == 20

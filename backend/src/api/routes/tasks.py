@@ -1189,7 +1189,9 @@ async def cancel_task(
             "cancelled",
             progress=0,
             progress_message="Cancelled by user",
-            expected_statuses=["queued", "processing"],
+            # awaiting_review is cancellable from the review UI; without it the
+            # Redis cancel flag was set while the DB stayed on awaiting_review.
+            expected_statuses=["queued", "processing", "awaiting_review"],
         )
 
         return {"message": "Task cancellation requested"}

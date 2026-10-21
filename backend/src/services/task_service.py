@@ -707,12 +707,12 @@ class TaskService(ClipEditingMixin):
                     "cancelled",
                     progress=0,
                     progress_message="Cancelled by user",
-                    expected_statuses=["queued", "processing"],
+                    expected_statuses=["queued", "processing", "awaiting_review"],
                 )
                 raise
             failed = await self.task_repo.update_task_status(
                 self.db, task_id, "error", progress=0, progress_message=str(e),
-                expected_statuses=["queued", "processing"],
+                expected_statuses=["queued", "processing", "awaiting_review"],
             )
             if failed is False:
                 raise
@@ -829,13 +829,16 @@ class TaskService(ClipEditingMixin):
 
         async def update_progress(progress: int, message: str, status: str = "processing"):
             await check_cancelled()
+            # Include queued: enqueue leaves the task queued until we claim it.
+            # A prior bug raised TaskCancelled when the first progress update
+            # rejected status=queued (render-selected failed in <100ms).
             changed = await self.task_repo.update_task_status(
                 self.db,
                 task_id,
                 status,
                 progress=progress,
                 progress_message=message,
-                expected_statuses=["processing", "awaiting_review"],
+                expected_statuses=["queued", "processing", "awaiting_review"],
             )
             if changed is False:
                 raise TaskCancelled()
@@ -917,11 +920,9 @@ class TaskService(ClipEditingMixin):
             and str(seg.get("start_time") or "").strip()
             not in {str(s.get("start_time") or "").strip() for s in to_render}
         ]
-        await update_progress(
-            20,
-            f"Gerando {len(to_render)} corte(s) selecionado(s)…",
-        )
 
+        # Claim queued → processing BEFORE any progress helper that used to
+        # reject queued and falsely cancel render-selected / generate-more.
         started = await self.task_repo.update_task_status(
             self.db,
             task_id,
@@ -932,6 +933,12 @@ class TaskService(ClipEditingMixin):
         )
         if started is False:
             raise TaskCancelled()
+        if progress_callback:
+            await progress_callback(
+                20,
+                f"Gerando {len(to_render)} corte(s) selecionado(s)…",
+                "processing",
+            )
 
         video_path = Path(cache_entry["video_path"])
         if not video_path.exists():
