@@ -317,19 +317,28 @@ def get_video_transcript(
     video_path: Path,
     speech_model: str = "universal",
     source_url: Optional[str] = None,
+    language: Optional[str] = None,
 ) -> str:
     """Get a video transcript using the configured provider.
 
     Dispatches to AssemblyAI, local Whisper, or YouTube captions based on
     ``TRANSCRIPTION_PROVIDER``. ``source_url`` enables the youtube_captions
     provider, which needs the original URL rather than a local file path.
+
+    ``language`` overrides the process-wide ``TRANSCRIPTION_LANGUAGE`` when set
+    (including empty string for auto-detect). ``None`` keeps the env default.
     """
     logger.info(f"Getting transcript for: {video_path}")
     runtime_config = get_config()
     provider = runtime_config.transcription_provider
+    effective_language = (
+        runtime_config.transcription_language if language is None else language
+    )
 
     if provider == "whisper":
-        return _get_transcript_with_whisper(video_path, runtime_config)
+        return _get_transcript_with_whisper(
+            video_path, runtime_config, language=effective_language
+        )
     if provider == "youtube_captions":
         if not source_url:
             raise ValueError(
@@ -337,11 +346,16 @@ def get_video_transcript(
                 "Pass source_url to get_video_transcript()."
             )
         return _get_transcript_with_youtube_captions(source_url)
-    return _get_transcript_with_assemblyai(video_path, speech_model, runtime_config)
+    return _get_transcript_with_assemblyai(
+        video_path, speech_model, runtime_config, language=effective_language
+    )
 
 
 def _get_transcript_with_assemblyai(
-    video_path: Path, speech_model: str, runtime_config
+    video_path: Path,
+    speech_model: str,
+    runtime_config,
+    language: Optional[str] = None,
 ) -> str:
     """Get transcript using AssemblyAI with word-level timing for precise subtitles."""
     aai.settings.api_key = runtime_config.assembly_ai_api_key
@@ -354,7 +368,8 @@ def _get_transcript_with_assemblyai(
 
     # Without a language, AssemblyAI assumes US English and garbles everything
     # else; detection also routes to the first listed model that supports it.
-    language = runtime_config.transcription_language
+    if language is None:
+        language = runtime_config.transcription_language
     config_obj = aai.TranscriptionConfig(
         speaker_labels=True,
         punctuate=True,
@@ -404,12 +419,18 @@ def _get_transcript_with_assemblyai(
         raise
 
 
-def _get_transcript_with_whisper(video_path: Path, runtime_config) -> str:
+def _get_transcript_with_whisper(
+    video_path: Path,
+    runtime_config,
+    language: Optional[str] = None,
+) -> str:
     """Get transcript using local Whisper with word-level timestamps."""
     model_name = runtime_config.whisper_model
+    if language is None:
+        language = runtime_config.transcription_language
     logger.info("Starting Whisper transcription with model: %s", model_name)
     whisper_result = transcribe_with_whisper(
-        video_path, model_name, runtime_config.transcription_language or None
+        video_path, model_name, language or None
     )
 
     formatted_lines = format_transcript_for_analysis(whisper_result)
@@ -671,3 +692,193 @@ def format_ms_to_timestamp(ms: int) -> str:
     minutes = seconds // 60
     seconds = seconds % 60
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def _format_ms_to_srt_timestamp(ms: int) -> str:
+    """Format milliseconds to SRT ``HH:MM:SS,mmm``."""
+    total_ms = max(0, int(ms))
+    hours, rem = divmod(total_ms, 3_600_000)
+    minutes, rem = divmod(rem, 60_000)
+    seconds, millis = divmod(rem, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+def _transcript_cues_from_data(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Build timed cues from cached transcript payload (ms timestamps)."""
+    utterances = data.get("utterances") or []
+    cues: List[Dict[str, Any]] = []
+    if isinstance(utterances, list) and utterances:
+        for utterance in utterances:
+            if not isinstance(utterance, dict):
+                continue
+            text = str(utterance.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                start = int(utterance.get("start") or 0)
+                end = int(utterance.get("end") or start)
+            except (TypeError, ValueError):
+                continue
+            cues.append(
+                {
+                    "start": start,
+                    "end": max(end, start),
+                    "text": text,
+                    "speaker": utterance.get("speaker"),
+                }
+            )
+        if cues:
+            return cues
+
+    words = data.get("words") or []
+    if not isinstance(words, list) or not words:
+        return cues
+
+    current: List[Dict[str, Any]] = []
+    current_start: Optional[int] = None
+    current_speaker = None
+
+    def flush() -> None:
+        nonlocal current, current_start, current_speaker
+        if not current:
+            return
+        text = _join_transcript_tokens(
+            [str(word.get("text") or "") for word in current]
+        )
+        if text:
+            cues.append(
+                {
+                    "start": int(current[0].get("start") or 0),
+                    "end": int(current[-1].get("end") or 0),
+                    "text": text,
+                    "speaker": current_speaker,
+                }
+            )
+        current = []
+        current_start = None
+        current_speaker = None
+
+    for raw in words:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            start = int(raw.get("start") or 0)
+            end = int(raw.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        speaker = raw.get("speaker")
+        if current and speaker is not None and speaker != current_speaker:
+            flush()
+        if current_start is None:
+            current_start = start
+            current_speaker = speaker
+        current.append({"start": start, "end": end, "text": raw.get("text") or ""})
+        duration_ms = end - current_start
+        ends_sentence = str(raw.get("text") or "").endswith((".", "!", "?"))
+        if len(current) >= ANALYSIS_SEGMENT_MAX_WORDS or (
+            ends_sentence and len(current) >= ANALYSIS_SEGMENT_MIN_WORDS
+        ) or (
+            duration_ms >= ANALYSIS_SEGMENT_MAX_DURATION_MS
+            and len(current) >= ANALYSIS_SEGMENT_MIN_WORDS
+        ):
+            flush()
+    flush()
+    return cues
+
+
+def build_srt_from_transcript_data(data: Dict[str, Any]) -> str:
+    """Serialize cached transcript words/utterances to SRT."""
+    cues = _transcript_cues_from_data(data)
+    if not cues:
+        plain = str(data.get("text") or "").strip()
+        if not plain:
+            return ""
+        return (
+            "1\n"
+            f"{_format_ms_to_srt_timestamp(0)} --> {_format_ms_to_srt_timestamp(3000)}\n"
+            f"{plain}\n"
+        )
+
+    blocks: List[str] = []
+    for index, cue in enumerate(cues, start=1):
+        speaker = cue.get("speaker")
+        prefix = f"Speaker {speaker}: " if speaker not in (None, "") else ""
+        blocks.append(
+            f"{index}\n"
+            f"{_format_ms_to_srt_timestamp(cue['start'])} --> "
+            f"{_format_ms_to_srt_timestamp(cue['end'])}\n"
+            f"{prefix}{cue['text']}\n"
+        )
+    return "\n".join(blocks)
+
+
+def build_plain_text_from_transcript_data(data: Dict[str, Any]) -> str:
+    """Plain transcript text preferring structured cues, then ``text`` field."""
+    plain = str(data.get("text") or "").strip()
+    if plain:
+        return plain
+    cues = _transcript_cues_from_data(data)
+    lines: List[str] = []
+    for cue in cues:
+        speaker = cue.get("speaker")
+        prefix = f"Speaker {speaker}: " if speaker not in (None, "") else ""
+        lines.append(f"{prefix}{cue['text']}")
+    return "\n".join(lines)
+
+
+def normalize_transcript_payload(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Normalize a disk/DB transcript payload for export and cache reuse."""
+    if not isinstance(data, dict):
+        return None
+    # processing_cache may wrap the payload.
+    if data.get("kind") == "transcript_payload" and isinstance(
+        data.get("payload"), dict
+    ):
+        data = data["payload"]
+    words = data.get("words") if isinstance(data.get("words"), list) else []
+    utterances = (
+        data.get("utterances") if isinstance(data.get("utterances"), list) else []
+    )
+    text = data.get("text")
+    if not isinstance(text, str):
+        text = build_plain_text_from_transcript_data(
+            {"words": words, "utterances": utterances, "text": ""}
+        )
+    if not text and not words and not utterances:
+        return None
+    return {
+        "version": data.get("version") or TRANSCRIPT_CACHE_SCHEMA_VERSION,
+        "text": text,
+        "words": words,
+        "utterances": utterances,
+        "language_code": (
+            data.get("language_code")
+            if isinstance(data.get("language_code"), str)
+            else None
+        ),
+    }
+
+
+def wrap_transcript_payload_for_cache(payload: Dict[str, Any]) -> str:
+    """JSON string stored in ``processing_cache.analysis_json`` for STT-only jobs."""
+    return json.dumps(
+        {
+            "kind": "transcript_payload",
+            "version": 1,
+            "payload": payload,
+        },
+        ensure_ascii=False,
+    )
+
+
+def unwrap_transcript_payload_from_cache(
+    analysis_json: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Parse ``processing_cache.analysis_json`` back into a transcript payload."""
+    if not analysis_json or not isinstance(analysis_json, str):
+        return None
+    try:
+        parsed = json.loads(analysis_json)
+    except json.JSONDecodeError:
+        return None
+    return normalize_transcript_payload(parsed if isinstance(parsed, dict) else None)

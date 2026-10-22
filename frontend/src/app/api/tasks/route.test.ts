@@ -24,7 +24,7 @@ describe("/api/tasks", () => {
   it("returns 401 when unauthenticated", async () => {
     vi.mocked(getServerSession).mockResolvedValue(null);
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/tasks/"));
 
     expect(response.status).toBe(401);
   });
@@ -44,7 +44,7 @@ describe("/api/tasks", () => {
       }),
     );
 
-    const response = await GET();
+    const response = await GET(new Request("http://localhost/api/tasks/"));
 
     expect(fetchBackend).toHaveBeenCalledWith(
       "/tasks/",
@@ -55,5 +55,23 @@ describe("/api/tasks", () => {
     );
     expect(response.headers.get("x-trace-id")).toBe("trace-1");
     await expect(response.json()).resolves.toEqual({ tasks: [] });
+  });
+
+  it("forwards job_kind query to the backend", async () => {
+    vi.mocked(getServerSession).mockResolvedValue({
+      user: { id: "user-1" },
+    } as never);
+    vi.mocked(fetchBackend).mockResolvedValue(
+      new Response(JSON.stringify({ tasks: [] }), { status: 200 }),
+    );
+
+    await GET(
+      new Request("http://localhost/api/tasks/?job_kind=transcribe"),
+    );
+
+    expect(fetchBackend).toHaveBeenCalledWith(
+      "/tasks/?job_kind=transcribe",
+      expect.objectContaining({ method: "GET", userId: "user-1" }),
+    );
   });
 });

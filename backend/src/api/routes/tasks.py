@@ -4,7 +4,7 @@ Task API routes using refactored architecture.
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 from pathlib import Path
@@ -247,6 +247,8 @@ def _merge_task_source_metadata(
     cleanup_settings: Dict[str, Any] | None = None,
     clip_selection: Dict[str, Any] | None = None,
     review_before_render: bool | None = None,
+    job_kind: str | None = None,
+    language: str | None = None,
 ) -> Dict[str, Any]:
     merged = dict(existing or {})
 
@@ -266,6 +268,10 @@ def _merge_task_source_metadata(
             merged.pop("clip_brief", None)
     if isinstance(review_before_render, bool):
         merged["review_before_render"] = review_before_render
+    if job_kind in {"transcribe", "clip"}:
+        merged["job_kind"] = job_kind
+    if isinstance(language, str) and language.strip():
+        merged["language"] = language.strip().lower().replace("-", "_")
 
     return merged
 
@@ -330,16 +336,25 @@ def _build_public_task(task: Dict[str, Any], share_token: str) -> Dict[str, Any]
 
 @router.get("/")
 async def list_tasks(
-    request: Request, db: AsyncSession = Depends(get_db), limit: int = 50
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    limit: int = 50,
+    job_kind: str | None = None,
 ):
     """
-    Get all tasks for the authenticated user.
+    Get tasks for the authenticated user.
+
+    Default excludes ``job_kind=transcribe`` (Library). Pass
+    ``job_kind=transcribe`` for the Transcrever history.
     """
     user_id = await _get_user_id_from_headers(request, db)
+    kind_filter = job_kind if job_kind == "transcribe" else None
 
     try:
         task_service = TaskService(db)
-        tasks = await task_service.get_user_tasks(user_id, limit)
+        tasks = await task_service.get_user_tasks(
+            user_id, limit, job_kind=kind_filter
+        )
 
         return {"tasks": tasks, "total": len(tasks)}
 
@@ -361,6 +376,14 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Source URL is required")
     user_id = await _get_user_id_from_headers(request, db)
 
+    raw_job_kind = data.get("job_kind")
+    job_kind = (
+        "transcribe"
+        if isinstance(raw_job_kind, str) and raw_job_kind.strip().lower() == "transcribe"
+        else "clip"
+    )
+    is_transcribe = job_kind == "transcribe"
+
     # Get font options
     font_options = data.get("font_options", {})
     if not isinstance(font_options, dict):
@@ -371,8 +394,11 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     caption_template = data.get("caption_template", "default")
     include_broll = data.get("include_broll", False)
     runtime_config = get_config()
-    processing_mode = data.get(
-        "processing_mode", runtime_config.default_processing_mode
+    # Transcribe surface always uses max STT quality (AssemblyAI universal-3-pro).
+    processing_mode = (
+        "quality"
+        if is_transcribe
+        else data.get("processing_mode", runtime_config.default_processing_mode)
     )
     if processing_mode not in {"fast", "balanced", "quality"}:
         processing_mode = runtime_config.default_processing_mode
@@ -383,21 +409,34 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     if not isinstance(add_subtitles, bool):
         add_subtitles = True
     cleanup_settings = new_task_cleanup_settings(data)
-    review_before_render = bool(data.get("review_before_render", False))
-    try:
-        clip_prefs = parse_clip_selection_prefs(
-            duration_preset=data.get("clip_duration_preset"),
-            min_clips=data.get("min_clips"),
-            clip_brief=data.get("clip_brief"),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    review_before_render = (
+        False if is_transcribe else bool(data.get("review_before_render", False))
+    )
+    transcript_language = "pt"
+    if is_transcribe:
+        raw_language = data.get("language")
+        if isinstance(raw_language, str) and raw_language.strip():
+            transcript_language = raw_language.strip().lower().replace("-", "_")
+        clip_prefs = ClipSelectionPrefs()
+    else:
+        try:
+            clip_prefs = parse_clip_selection_prefs(
+                duration_preset=data.get("clip_duration_preset"),
+                min_clips=data.get("min_clips"),
+                clip_brief=data.get("clip_brief"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
 
     try:
         billing_service = BillingService(db)
-        billing = await billing_service.assert_can_create_task(user_id)
+        # Transcription jobs do not consume clipping allowance when monetized.
+        if is_transcribe:
+            billing = await billing_service.get_usage_summary(user_id)
+        else:
+            billing = await billing_service.assert_can_create_task(user_id)
 
         task_service = TaskService(db)
 
@@ -417,28 +456,32 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             duration_value = metadata.get("duration")
             if isinstance(duration_value, (int, float)) and duration_value > 0:
                 source_duration_seconds = float(duration_value)
-            if not preset_is_feasible(source_duration_seconds, clip_prefs):
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Duration preset '{clip_prefs.duration_preset}' needs at least "
-                        f"{clip_prefs.min_seconds // 60} minutes of source video "
-                        f"(got about {int((source_duration_seconds or 0) // 60)} minutes)."
-                    ),
-                )
-            if clip_prefs.min_clips is not None and source_duration_seconds is not None:
-                fit = physical_max_clips(source_duration_seconds, clip_prefs)
-                if clip_prefs.min_clips > fit:
-                    clip_prefs = ClipSelectionPrefs(
-                        duration_preset=clip_prefs.duration_preset,
-                        min_clips=fit,
-                        brief=clip_prefs.brief,
+            if not is_transcribe:
+                if not preset_is_feasible(source_duration_seconds, clip_prefs):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            f"Duration preset '{clip_prefs.duration_preset}' needs at least "
+                            f"{clip_prefs.min_seconds // 60} minutes of source video "
+                            f"(got about {int((source_duration_seconds or 0) // 60)} minutes)."
+                        ),
                     )
+                if clip_prefs.min_clips is not None and source_duration_seconds is not None:
+                    fit = physical_max_clips(source_duration_seconds, clip_prefs)
+                    if clip_prefs.min_clips > fit:
+                        clip_prefs = ClipSelectionPrefs(
+                            duration_preset=clip_prefs.duration_preset,
+                            min_clips=fit,
+                            brief=clip_prefs.brief,
+                        )
 
         async with generation_allowance_guard(
-            db, user_id, enabled=runtime_config.monetization_enabled
+            db,
+            user_id,
+            enabled=runtime_config.monetization_enabled and not is_transcribe,
         ):
-            await billing_service.assert_can_create_task(user_id)
+            if not is_transcribe:
+                await billing_service.assert_can_create_task(user_id)
             # Create task
             task_id = await task_service.create_task_with_source(
                 user_id=user_id,
@@ -464,8 +507,12 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                         output_format=output_format,
                         add_subtitles=add_subtitles,
                         cleanup_settings=cleanup_settings,
-                        clip_selection=clip_prefs.to_metadata(),
+                        clip_selection=(
+                            None if is_transcribe else clip_prefs.to_metadata()
+                        ),
                         review_before_render=review_before_render,
+                        job_kind=job_kind,
+                        language=transcript_language if is_transcribe else None,
                     ),
                     db=db,
                 )
@@ -609,6 +656,38 @@ async def get_task(
     except Exception as e:
         logger.error(f"Error retrieving task: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving task: {str(e)}")
+
+
+@router.get("/{task_id}/transcript")
+async def get_task_transcript(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    format: str = "txt",
+):
+    """Export a completed transcription job as txt, srt, or json."""
+    task_service = TaskService(db)
+    task = await _require_task_owner(request, task_service, db, task_id)
+    if task.get("status") != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="Transcript is only available after the job completes",
+        )
+    try:
+        body, media_type, filename = await task_service.get_transcript_export(
+            task_id, format
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 @router.get("/{task_id}/clips")

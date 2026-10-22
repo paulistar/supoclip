@@ -102,6 +102,7 @@ interface TaskDetails {
   status: string;
   progress?: number;
   progress_message?: string;
+  job_kind?: string;
   clips_count: number;
   created_at: string;
   updated_at: string;
@@ -275,6 +276,11 @@ export default function TaskPage() {
           });
         }
 
+        if (taskData.job_kind === "transcribe") {
+          router.replace(`/transcribe/${params.id}`);
+          return true;
+        }
+
         setTask(taskData);
         return true;
       } catch (err) {
@@ -283,7 +289,7 @@ export default function TaskPage() {
         return false;
       }
     },
-    [buildSupportError, params.id, taskApiUrl],
+    [buildSupportError, params.id, router, taskApiUrl],
   );
 
   const fetchCandidates = useCallback(async () => {

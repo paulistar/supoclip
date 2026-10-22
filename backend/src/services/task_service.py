@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional, Callable, Mapping, Sequence
 import asyncio
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 import json
@@ -47,10 +48,19 @@ from ..clip_review import (
     segment_duration_seconds,
 )
 from ..clip_source_map import load_clip_caption_settings
+from ..media.transcription import (
+    build_plain_text_from_transcript_data,
+    build_srt_from_transcript_data,
+    load_cached_transcript_data,
+    normalize_transcript_payload,
+    unwrap_transcript_payload_from_cache,
+    wrap_transcript_payload_for_cache,
+)
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
 logger = logging.getLogger(__name__)
 PROCESSING_CACHE_VERSION = "20260319_grounded_segments_v1"
+TRANSCRIBE_CACHE_VERSION = "20261022_transcribe_v1"
 
 
 def _is_closed_db_connection(exc: BaseException) -> bool:
@@ -93,6 +103,27 @@ class TaskService(ClipEditingMixin):
             f"{selection.cache_token()}|{url.strip()}"
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _build_transcribe_cache_key(
+        url: str,
+        source_type: str,
+        *,
+        provider: str,
+        speech_model: str,
+        language: str,
+    ) -> str:
+        payload = (
+            f"transcribe|{TRANSCRIBE_CACHE_VERSION}|{source_type}|"
+            f"{provider}|{speech_model}|{language or 'auto'}|{url.strip()}"
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _transcribe_speech_model(processing_mode: str, provider: str) -> str:
+        if processing_mode in {"fast", "balanced"} and provider == "assemblyai":
+            return get_config().fast_mode_transcript_model
+        return "best"
 
     async def _render_segments_concurrent(
         self,
@@ -466,6 +497,18 @@ class TaskService(ClipEditingMixin):
                     clip_ready_callback=clip_ready_callback,
                     source_metadata=source_metadata,
                     replace_existing=replace_existing,
+                )
+
+            if source_metadata.get("job_kind") == "transcribe":
+                return await self._process_transcribe_only(
+                    task_id=task_id,
+                    url=url,
+                    source_type=source_type,
+                    user_id=user_id,
+                    processing_mode=processing_mode,
+                    source_metadata=source_metadata,
+                    progress_callback=progress_callback,
+                    should_cancel=should_cancel,
                 )
 
             try:
@@ -1211,6 +1254,292 @@ class TaskService(ClipEditingMixin):
             "brief_updated": bool(permanent and phrases),
         }
 
+    async def _process_transcribe_only(
+        self,
+        *,
+        task_id: str,
+        url: str,
+        source_type: str,
+        user_id: Optional[str],
+        processing_mode: str,
+        source_metadata: Dict[str, Any],
+        progress_callback: Optional[Callable] = None,
+        should_cancel: Optional[Callable] = None,
+    ) -> Dict[str, Any]:
+        """Download (if needed) + STT only; no LLM analysis or clip render."""
+        video_path: Optional[Path] = None
+        started_at = datetime.utcnow()
+        stage_timings: Dict[str, float] = {}
+
+        async def check_cancelled():
+            if should_cancel and await should_cancel():
+                raise TaskCancelled()
+
+        language_raw = source_metadata.get("language")
+        language = (
+            str(language_raw).strip().lower().replace("-", "_")
+            if isinstance(language_raw, str) and language_raw.strip()
+            else "pt"
+        )
+        runtime_config = self.config
+        provider = runtime_config.transcription_provider
+        speech_model = self._transcribe_speech_model(processing_mode, provider)
+        cache_key = self._build_transcribe_cache_key(
+            url,
+            source_type,
+            provider=provider,
+            speech_model=speech_model,
+            language=language,
+        )
+
+        try:
+            await check_cancelled()
+            cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
+            cached_payload = unwrap_transcript_payload_from_cache(
+                cache_entry.get("analysis_json") if cache_entry else None
+            )
+            cache_hit = bool(cached_payload and cached_payload.get("text"))
+
+            await self.task_repo.update_task_runtime_metadata(
+                self.db,
+                task_id,
+                started_at=started_at,
+                cache_hit=cache_hit,
+            )
+
+            started = await self.task_repo.update_task_status(
+                self.db,
+                task_id,
+                "processing",
+                progress=0,
+                progress_message="Starting...",
+                expected_statuses=["queued", "processing"],
+            )
+            if started is False:
+                raise TaskCancelled()
+
+            async def update_progress(
+                progress: int, message: str, status: str = "processing"
+            ):
+                await check_cancelled()
+
+                async def _write_status():
+                    return await self.task_repo.update_task_status(
+                        self.db,
+                        task_id,
+                        status,
+                        progress=progress,
+                        progress_message=message,
+                        expected_statuses=["processing"],
+                    )
+
+                changed = await self._db_after_render_gap(_write_status)
+                if changed is False:
+                    raise TaskCancelled()
+                if progress_callback:
+                    await progress_callback(progress, message, status)
+
+            await commit_unless_editing(self.db)
+
+            if cache_hit and cached_payload:
+                await update_progress(90, "Reusing cached transcript…")
+                payload = cached_payload
+                transcript_text = build_plain_text_from_transcript_data(payload)
+            else:
+                max_video_duration = self.config.max_video_duration
+                if source_type == "youtube" and user_id:
+                    billing = await BillingService(self.db, self.config).get_usage_summary(
+                        user_id
+                    )
+                    max_video_duration = self.config.max_youtube_video_duration_for_plan(
+                        billing.get("plan"), billing.get("subscription_status")
+                    )
+                    await commit_unless_editing(self.db)
+
+                await update_progress(10, "Baixando vídeo…")
+                pipeline_start = perf_counter()
+                if source_type == "youtube":
+                    video_path = await self.video_service.download_video(
+                        url, task_id=task_id
+                    )
+                    if not video_path:
+                        raise ValueError("Failed to download video")
+                else:
+                    video_path = self.video_service.resolve_local_video_path(url)
+                    if not video_path.exists():
+                        raise ValueError("Video file not found")
+
+                file_duration = self.video_service._get_file_duration(video_path)
+                if file_duration and file_duration > max_video_duration:
+                    mins = max_video_duration // 60
+                    raise ValueError(
+                        f"Video is too long ({int(file_duration) // 60} min). "
+                        f"Maximum allowed duration is {mins} minutes."
+                    )
+
+                stage_timings["download_seconds"] = round(
+                    perf_counter() - pipeline_start, 3
+                )
+                await check_cancelled()
+                await update_progress(30, "Transcrevendo…")
+                stt_start = perf_counter()
+                transcript_text = await self.video_service.generate_transcript(
+                    video_path,
+                    processing_mode=processing_mode,
+                    source_url=url if source_type == "youtube" else None,
+                    language=language,
+                )
+                stage_timings["transcript_seconds"] = round(
+                    perf_counter() - stt_start, 3
+                )
+
+                disk_payload = normalize_transcript_payload(
+                    load_cached_transcript_data(video_path)
+                )
+                if disk_payload:
+                    payload = disk_payload
+                    if not payload.get("text"):
+                        payload["text"] = transcript_text
+                else:
+                    payload = {
+                        "version": 1,
+                        "text": transcript_text,
+                        "words": [],
+                        "utterances": [],
+                        "language_code": language,
+                    }
+
+                await self._db_after_render_gap(
+                    self.cache_repo.upsert_cache,
+                    self.db,
+                    cache_key=cache_key,
+                    source_url=url,
+                    source_type=source_type,
+                    video_path=str(video_path) if video_path else None,
+                    transcript_text=transcript_text,
+                    analysis_json=wrap_transcript_payload_for_cache(payload),
+                )
+
+            await update_progress(95, "Salvando transcript…")
+            preview = (payload.get("text") or transcript_text or "")[:2000]
+            meta_update = {
+                **source_metadata,
+                "job_kind": "transcribe",
+                "language": language,
+                "transcript_cache_key": cache_key,
+                "transcript_payload": payload,
+                "transcript_preview": preview,
+                "transcript_char_count": len(
+                    payload.get("text") or transcript_text or ""
+                ),
+            }
+            await self._db_after_render_gap(
+                self.task_repo.save_source_metadata,
+                self.db,
+                task_id,
+                meta_update,
+            )
+
+            done_message = "Transcrição concluída"
+            async def _mark_completed():
+                return await self.task_repo.update_task_status(
+                    self.db,
+                    task_id,
+                    "completed",
+                    progress=100,
+                    progress_message=done_message,
+                    expected_statuses=["processing"],
+                )
+
+            completed = await self._db_after_render_gap(_mark_completed)
+            if completed is False:
+                raise TaskCancelled()
+            if progress_callback:
+                await progress_callback(100, done_message, "completed")
+
+            await self._db_after_render_gap(
+                self.task_repo.update_task_runtime_metadata,
+                self.db,
+                task_id,
+                completed_at=datetime.utcnow(),
+                stage_timings_json=json.dumps(stage_timings),
+                error_code="",
+            )
+
+            if video_path:
+                self._cleanup_source_video(video_path, source_type, url)
+
+            logger.info(
+                "Transcribe task %s completed (%d chars)",
+                task_id,
+                len(transcript_text or ""),
+            )
+            return {
+                "task_id": task_id,
+                "clips_count": 0,
+                "transcript_char_count": len(transcript_text or ""),
+                "job_kind": "transcribe",
+            }
+
+        except Exception:
+            if video_path:
+                self._cleanup_source_video(video_path, source_type, url)
+            raise
+
+    async def get_transcript_export(
+        self, task_id: str, fmt: str = "txt"
+    ) -> tuple[str, str, str]:
+        """Return (body, media_type, filename) for a transcribe task export."""
+        metadata = await self.task_repo.load_source_metadata(self.db, task_id)
+        if metadata.get("job_kind") != "transcribe":
+            raise ValueError("Task is not a transcription job")
+
+        payload = normalize_transcript_payload(metadata.get("transcript_payload"))
+        if not payload:
+            cache_key = metadata.get("transcript_cache_key")
+            if isinstance(cache_key, str) and cache_key:
+                cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
+                if cache_entry:
+                    payload = unwrap_transcript_payload_from_cache(
+                        cache_entry.get("analysis_json")
+                    )
+                    if not payload and cache_entry.get("transcript_text"):
+                        payload = {
+                            "text": cache_entry["transcript_text"],
+                            "words": [],
+                            "utterances": [],
+                            "language_code": metadata.get("language"),
+                        }
+                    video_path_raw = cache_entry.get("video_path")
+                    if not payload and isinstance(video_path_raw, str) and video_path_raw:
+                        disk = normalize_transcript_payload(
+                            load_cached_transcript_data(Path(video_path_raw))
+                        )
+                        if disk:
+                            payload = disk
+
+        if not payload:
+            raise ValueError("Transcript not available yet")
+
+        fmt_normalized = (fmt or "txt").strip().lower()
+        if fmt_normalized not in {"txt", "srt", "json"}:
+            raise ValueError("format must be txt, srt, or json")
+
+        task = await self.task_repo.get_task_by_id(self.db, task_id)
+        raw_title = (task or {}).get("source_title") or "transcript"
+        safe_title = re.sub(r"[^\w\-]+", "_", str(raw_title))[:60] or "transcript"
+
+        if fmt_normalized == "json":
+            body = json.dumps(payload, ensure_ascii=False, indent=2)
+            return body, "application/json", f"{safe_title}.json"
+        if fmt_normalized == "srt":
+            body = build_srt_from_transcript_data(payload)
+            if not body.strip():
+                raise ValueError("No timed cues available for SRT export")
+            return body, "application/x-subrip", f"{safe_title}.srt"
+        body = build_plain_text_from_transcript_data(payload)
+        return body, "text/plain; charset=utf-8", f"{safe_title}.txt"
+
     async def get_task_with_clips(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Get task details with all clips."""
         task = await self.task_repo.get_task_by_id(self.db, task_id)
@@ -1272,10 +1601,12 @@ class TaskService(ClipEditingMixin):
         return task
 
     async def get_user_tasks(
-        self, user_id: str, limit: int = 50
+        self, user_id: str, limit: int = 50, *, job_kind: Optional[str] = None
     ) -> list[Dict[str, Any]]:
-        """Get all tasks for a user."""
-        return await self.task_repo.get_user_tasks(self.db, user_id, limit)
+        """Get tasks for a user (clip Library by default; pass job_kind=transcribe)."""
+        return await self.task_repo.get_user_tasks(
+            self.db, user_id, limit, job_kind=job_kind
+        )
 
     @serialized_task_edit
     async def delete_task(self, task_id: str) -> None:

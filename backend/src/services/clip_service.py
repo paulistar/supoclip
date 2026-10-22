@@ -597,6 +597,10 @@ class ClipEditingMixin:
             reason = str((entry or {}).get("reason") or "unknown")
             drop_counts[reason] = drop_counts.get(reason, 0) + 1
 
+        job_kind = parsed.get("job_kind")
+        if job_kind not in {"transcribe", "clip", None}:
+            job_kind = None
+
         return {
             "output_format": output_format,
             "add_subtitles": add_subtitles,
@@ -619,6 +623,18 @@ class ClipEditingMixin:
                 if parsed.get("excellent_clip_count") is not None
                 else None
             ),
+            "job_kind": job_kind if job_kind else "clip",
+            "language": (
+                parsed.get("language")
+                if isinstance(parsed.get("language"), str)
+                else None
+            ),
+            "transcript_preview": (
+                parsed.get("transcript_preview")
+                if isinstance(parsed.get("transcript_preview"), str)
+                else None
+            ),
+            "transcript_char_count": parsed.get("transcript_char_count"),
             **normalize_clip_cleanup_settings(
                 parsed.get("cut_long_pauses"),
                 parsed.get("pause_threshold_ms"),

@@ -100,6 +100,7 @@ class BillingService:
                 WHERE t.user_id = :user_id
                   AND t.created_at >= :period_start
                   AND t.created_at <= :period_end
+                  AND COALESCE(t.source_metadata->>'job_kind', 'clip') <> 'transcribe'
                   AND (
                       COALESCE(t.status, '') NOT IN ('error', 'failed', 'cancelled', 'canceled')
                       OR EXISTS (

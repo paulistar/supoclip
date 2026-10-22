@@ -374,19 +374,37 @@ class TaskRepository:
 
     @staticmethod
     async def get_user_tasks(
-        db: AsyncSession, user_id: str, limit: int = 50
+        db: AsyncSession,
+        user_id: str,
+        limit: int = 50,
+        *,
+        job_kind: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get all tasks for a user."""
+        """Get tasks for a user.
+
+        ``job_kind='transcribe'`` returns only transcription jobs.
+        ``job_kind=None`` (default) excludes transcription jobs so the Library
+        stays clip-only.
+        """
+        if job_kind == "transcribe":
+            kind_clause = "AND COALESCE(t.source_metadata->>'job_kind', 'clip') = 'transcribe'"
+        else:
+            kind_clause = "AND COALESCE(t.source_metadata->>'job_kind', 'clip') <> 'transcribe'"
+
         result = await db.execute(
-            text("""
+            text(f"""
                 SELECT t.*, s.title as source_title, s.type as source_type, s.url as source_url,
                        (SELECT COUNT(*) FROM generated_clips WHERE task_id = t.id) as clips_count,
                        (SELECT MAX(virality_score) FROM generated_clips WHERE task_id = t.id) as top_virality_score,
                        (SELECT id FROM generated_clips WHERE task_id = t.id
-                        ORDER BY virality_score DESC NULLS LAST, clip_order ASC LIMIT 1) as cover_clip_id
+                        ORDER BY virality_score DESC NULLS LAST, clip_order ASC LIMIT 1) as cover_clip_id,
+                       COALESCE(t.source_metadata->>'job_kind', 'clip') as job_kind,
+                       t.source_metadata->>'transcript_preview' as transcript_preview,
+                       NULLIF(t.source_metadata->>'transcript_char_count', '')::int as transcript_char_count
                 FROM tasks t
                 LEFT JOIN sources s ON t.source_id = s.id
                 WHERE t.user_id = :user_id
+                  {kind_clause}
                 ORDER BY t.created_at DESC
                 LIMIT :limit
             """),
@@ -411,6 +429,9 @@ class TaskRepository:
                     "source_url": row.source_url,
                     "top_virality_score": row.top_virality_score,
                     "cover_clip_id": row.cover_clip_id,
+                    "job_kind": getattr(row, "job_kind", None) or "clip",
+                    "transcript_preview": getattr(row, "transcript_preview", None),
+                    "transcript_char_count": getattr(row, "transcript_char_count", None),
                     "created_at": row.created_at,
                     "updated_at": row.updated_at,
                 }

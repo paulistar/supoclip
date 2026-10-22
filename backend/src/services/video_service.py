@@ -220,11 +220,14 @@ class VideoService:
         video_path: Path,
         processing_mode: str = "balanced",
         source_url: Optional[str] = None,
+        language: Optional[str] = None,
     ) -> str:
         """
         Generate transcript from video using the configured provider
         (assemblyai, whisper, or youtube_captions).
         Runs in thread pool to avoid blocking.
+
+        ``language`` overrides ``TRANSCRIPTION_LANGUAGE`` for this call when set.
         """
         logger.info(f"Generating transcript for: {video_path}")
         speech_model = "best"
@@ -238,7 +241,7 @@ class VideoService:
             speech_model = runtime_config.fast_mode_transcript_model
 
         transcript = await run_in_thread(
-            get_video_transcript, video_path, speech_model, source_url
+            get_video_transcript, video_path, speech_model, source_url, language
         )
         logger.info(f"Transcript generated: {len(transcript)} characters")
         return transcript

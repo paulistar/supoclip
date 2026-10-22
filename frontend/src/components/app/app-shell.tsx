@@ -5,7 +5,7 @@ import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowRight, Bot, CornerDownLeft, Film, LogOut, Plus, Search, Settings, Shield, Sparkles,
+  ArrowRight, Bot, CornerDownLeft, Film, FileText, LogOut, Plus, Search, Settings, Shield, Sparkles,
 } from "lucide-react";
 import { toast } from "sonner";
 import { signOut, useSession } from "@/lib/auth-client";
@@ -24,6 +24,7 @@ type NavItem = { href: string; label: string; icon: typeof Film; match: (path: s
 
 const NAV: NavItem[] = [
   { href: "/", label: "Create", icon: Sparkles, match: (p) => p === "/" },
+  { href: "/transcribe", label: "Transcrever", icon: FileText, match: (p) => p.startsWith("/transcribe") },
   { href: "/list", label: "Library", icon: Film, match: (p) => p.startsWith("/list") || p.startsWith("/tasks") },
   { href: "/settings/api-keys", label: "Agents & API", icon: Bot, match: (p) => p.startsWith("/settings/api-keys") },
   { href: "/settings", label: "Settings", icon: Settings, match: (p) => p === "/settings" },
@@ -131,8 +132,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         {children}
       </div>
 
-      {user ? <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-4 border-t bg-background/90 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
-        {NAV.map((item) => {
+      {user ? <nav aria-label="Mobile navigation" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-5 border-t bg-background/90 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
+        {NAV.slice(0, 5).map((item) => {
           const active = item.match(pathname);
           return (
             <Link key={item.href} href={item.href} aria-current={active ? "page" : undefined}

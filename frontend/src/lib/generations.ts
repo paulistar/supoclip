@@ -9,12 +9,24 @@ export interface GenerationSummary {
   clips_count: number;
   top_virality_score?: number | null;
   cover_clip_id?: string | null;
+  job_kind?: "clip" | "transcribe" | string;
+  transcript_preview?: string | null;
+  transcript_char_count?: number | null;
   created_at: string;
   updated_at: string;
 }
 
-export async function fetchGenerations(): Promise<GenerationSummary[]> {
-  const response = await fetch("/api/tasks/", { cache: "no-store" });
+export async function fetchGenerations(options?: {
+  jobKind?: "transcribe";
+}): Promise<GenerationSummary[]> {
+  const params = new URLSearchParams();
+  if (options?.jobKind === "transcribe") {
+    params.set("job_kind", "transcribe");
+  }
+  const query = params.toString();
+  const response = await fetch(`/api/tasks/${query ? `?${query}` : ""}`, {
+    cache: "no-store",
+  });
   if (!response.ok) throw new Error(`Failed to fetch tasks: ${response.status}`);
   const data = await response.json();
   return (data.tasks || []) as GenerationSummary[];
