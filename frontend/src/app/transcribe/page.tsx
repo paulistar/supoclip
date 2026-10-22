@@ -244,7 +244,7 @@ export default function TranscribePage() {
           </Button>
         </div>
         {historyLoading ? (
-          <PageLoading label="Carregando histórico…" />
+          <PageLoading />
         ) : history.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             Nenhuma transcrição ainda.

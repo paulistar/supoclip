@@ -184,7 +184,7 @@ export default function TranscribeResultPage() {
   };
 
   if (isPending || !session?.user) {
-    return <PageLoading label="Carregando…" />;
+    return <PageLoading />;
   }
 
   if (!task && loadError) {
@@ -192,7 +192,7 @@ export default function TranscribeResultPage() {
   }
 
   if (!task) {
-    return <PageLoading label="Carregando transcrição…" />;
+    return <PageLoading />;
   }
 
   const resumable = RESUMABLE_TASK_STATUSES.includes(task.status);
