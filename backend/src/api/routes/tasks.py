@@ -690,6 +690,101 @@ async def get_task_transcript(
     )
 
 
+@router.get("/{task_id}/speakers")
+async def get_task_speakers(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """List diarized speakers for a completed transcription job."""
+    task_service = TaskService(db)
+    task = await _require_task_owner(request, task_service, db, task_id)
+    if task.get("status") != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="Speakers are only available after the job completes",
+        )
+    try:
+        return await task_service.list_transcribe_speakers(task_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/{task_id}/speakers")
+async def patch_task_speakers(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Save custom speaker names for a transcription job."""
+    task_service = TaskService(db)
+    task = await _require_task_owner(request, task_service, db, task_id)
+    if task.get("status") != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail="Speakers can only be edited after the job completes",
+        )
+    payload = await _read_json_object(request)
+    raw_speakers = payload.get("speakers")
+    if not isinstance(raw_speakers, dict):
+        raise HTTPException(status_code=400, detail="speakers must be an object")
+    try:
+        return await task_service.save_transcribe_speakers(task_id, raw_speakers)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/{task_id}/source-media")
+async def get_task_source_media(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db, scope="function"),
+):
+    """Stream preview audio for speaker sample playback."""
+    try:
+        task_service = TaskService(db)
+        task = await _require_task_owner(request, task_service, db, task_id)
+        if task.get("status") != "completed":
+            raise HTTPException(
+                status_code=409,
+                detail="Source media is only available after the job completes",
+            )
+        try:
+            media_path = await task_service.get_transcribe_preview_media_path(task_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        await db.close()
+        suffix = media_path.suffix.lower()
+        media_type = {
+            ".mp3": "audio/mpeg",
+            ".wav": "audio/wav",
+            ".ogg": "audio/ogg",
+            ".opus": "audio/opus",
+            ".m4a": "audio/mp4",
+            ".aac": "audio/aac",
+            ".flac": "audio/flac",
+            ".webm": "audio/webm",
+            ".mp4": "video/mp4",
+        }.get(suffix, "application/octet-stream")
+        return FileResponse(
+            path=str(media_path),
+            media_type=media_type,
+            filename=media_path.name,
+            content_disposition_type="inline",
+            headers={"Cache-Control": "private, no-store"},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error serving source media: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error serving source media: {str(e)}"
+        )
+
+
 @router.get("/{task_id}/clips")
 async def get_task_clips(
     task_id: str, request: Request, db: AsyncSession = Depends(get_db)

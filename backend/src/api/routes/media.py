@@ -281,9 +281,26 @@ async def get_broll_status():
     }
 
 
+_ALLOWED_MEDIA_EXTENSIONS = {
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".m4v",
+    ".webm",
+    ".mp3",
+    ".wav",
+    ".ogg",
+    ".opus",
+    ".m4a",
+    ".aac",
+    ".flac",
+}
+
+
 @router.post("/upload")
 async def upload_video(request: Request, db: AsyncSession = Depends(get_db)):
-    """Upload a video to the server."""
+    """Upload a video or audio file to the server."""
     try:
         await _get_authenticated_user_id(request, db)
         config = get_config()
@@ -293,7 +310,7 @@ async def upload_video(request: Request, db: AsyncSession = Depends(get_db)):
         video_file = cast(Any, form_data.get("video"))
 
         if not getattr(video_file, "filename", None) or not hasattr(video_file, "read"):
-            raise HTTPException(status_code=400, detail="No video file provided")
+            raise HTTPException(status_code=400, detail="No media file provided")
 
         upload = cast(UploadFile, video_file)
         upload_filename = upload.filename or "upload.mp4"
@@ -303,18 +320,26 @@ async def upload_video(request: Request, db: AsyncSession = Depends(get_db)):
         uploads_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate unique filename
-        file_extension = Path(upload_filename).suffix
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        file_extension = Path(upload_filename).suffix.lower()
+        if file_extension and file_extension not in _ALLOWED_MEDIA_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Unsupported media type. Use video or audio "
+                    "(mp3, wav, opus, m4a, ogg, flac, …)."
+                ),
+            )
+        unique_filename = f"{uuid.uuid4()}{file_extension or '.bin'}"
         video_path = uploads_dir / unique_filename
 
         # Save the uploaded file
         max_bytes = get_config().max_video_upload_bytes
         await _write_upload_to_disk(upload, video_path, max_bytes)
 
-        logger.info(f"✅ Video uploaded successfully to: {video_path}")
+        logger.info(f"✅ Media uploaded successfully to: {video_path}")
 
         return {
-            "message": "Video uploaded successfully",
+            "message": "Media uploaded successfully",
             "video_path": f"upload://{unique_filename}",
         }
     except HTTPException:

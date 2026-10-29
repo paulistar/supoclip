@@ -21,6 +21,7 @@ import {
   StatusBadge,
 } from "@/components/app/status-badge";
 import { PageError, PageLoading } from "@/components/app/page-state";
+import { SpeakerReview } from "@/components/app/speaker-review";
 import { Button } from "@/components/ui/button";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
 import { cn } from "@/lib/utils";
@@ -275,6 +276,22 @@ export default function TranscribeResultPage() {
 
       {completed ? (
         <>
+          <SpeakerReview
+            taskId={taskId}
+            onError={(message) => setLoadError(message)}
+            onNamesSaved={() => {
+              void loadTranscriptText()
+                .then(() => setLoadError(null))
+                .catch((error) => {
+                  setLoadError(
+                    error instanceof Error
+                      ? error.message
+                      : "Falha ao atualizar texto",
+                  );
+                });
+            }}
+          />
+
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"

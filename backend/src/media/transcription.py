@@ -786,7 +786,111 @@ def _transcript_cues_from_data(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return cues
 
 
-def build_srt_from_transcript_data(data: Dict[str, Any]) -> str:
+def resolve_speaker_label(
+    speaker: Any,
+    speaker_map: Optional[Dict[str, str]] = None,
+) -> str:
+    """Human label for a diarization id (``A`` → mapped name or ``Speaker A``)."""
+    if speaker in (None, ""):
+        return ""
+    key = str(speaker)
+    if isinstance(speaker_map, dict):
+        mapped = speaker_map.get(key)
+        if isinstance(mapped, str) and mapped.strip():
+            return mapped.strip()
+    return f"Speaker {key}"
+
+
+def default_speaker_map_from_payload(data: Dict[str, Any]) -> Dict[str, str]:
+    """Assign ``Pessoa 1``, ``Pessoa 2``, … to unique utterance speakers."""
+    speakers: List[str] = []
+    seen = set()
+    for utterance in data.get("utterances") or []:
+        if not isinstance(utterance, dict):
+            continue
+        raw = utterance.get("speaker")
+        if raw in (None, ""):
+            continue
+        key = str(raw)
+        if key in seen:
+            continue
+        seen.add(key)
+        speakers.append(key)
+    if not speakers:
+        for word in data.get("words") or []:
+            if not isinstance(word, dict):
+                continue
+            raw = word.get("speaker")
+            if raw in (None, ""):
+                continue
+            key = str(raw)
+            if key in seen:
+                continue
+            seen.add(key)
+            speakers.append(key)
+    speakers.sort()
+    return {key: f"Pessoa {index}" for index, key in enumerate(speakers, start=1)}
+
+
+def build_speaker_summaries(
+    data: Dict[str, Any],
+    speaker_map: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """Per-speaker stats + sample window for the review UI."""
+    defaults = default_speaker_map_from_payload(data)
+    merged: Dict[str, str] = {**defaults}
+    if isinstance(speaker_map, dict):
+        for key, value in speaker_map.items():
+            if isinstance(value, str) and value.strip():
+                merged[str(key)] = value.strip()
+
+    by_speaker: Dict[str, Dict[str, Any]] = {}
+    for utterance in data.get("utterances") or []:
+        if not isinstance(utterance, dict):
+            continue
+        raw = utterance.get("speaker")
+        if raw in (None, ""):
+            continue
+        key = str(raw)
+        try:
+            start = int(utterance.get("start") or 0)
+            end = int(utterance.get("end") or start)
+        except (TypeError, ValueError):
+            continue
+        text = str(utterance.get("text") or "").strip()
+        duration = max(0, end - start)
+        bucket = by_speaker.get(key)
+        if bucket is None:
+            bucket = {
+                "id": key,
+                "label": merged.get(key) or resolve_speaker_label(key),
+                "utterance_count": 0,
+                "total_duration_ms": 0,
+                "sample_start_ms": start,
+                "sample_end_ms": end,
+                "sample_duration_ms": duration,
+                "sample_text": text,
+            }
+            by_speaker[key] = bucket
+        bucket["utterance_count"] += 1
+        bucket["total_duration_ms"] += duration
+        # Prefer a longer sample (up to ~8s) for voice recognition.
+        sample_cap = 8_000
+        clipped_end = min(end, start + sample_cap)
+        clipped_duration = max(0, clipped_end - start)
+        if clipped_duration > int(bucket.get("sample_duration_ms") or 0):
+            bucket["sample_start_ms"] = start
+            bucket["sample_end_ms"] = clipped_end
+            bucket["sample_duration_ms"] = clipped_duration
+            bucket["sample_text"] = text
+
+    return sorted(by_speaker.values(), key=lambda item: str(item["id"]))
+
+
+def build_srt_from_transcript_data(
+    data: Dict[str, Any],
+    speaker_map: Optional[Dict[str, str]] = None,
+) -> str:
     """Serialize cached transcript words/utterances to SRT."""
     cues = _transcript_cues_from_data(data)
     if not cues:
@@ -801,8 +905,8 @@ def build_srt_from_transcript_data(data: Dict[str, Any]) -> str:
 
     blocks: List[str] = []
     for index, cue in enumerate(cues, start=1):
-        speaker = cue.get("speaker")
-        prefix = f"Speaker {speaker}: " if speaker not in (None, "") else ""
+        label = resolve_speaker_label(cue.get("speaker"), speaker_map)
+        prefix = f"{label}: " if label else ""
         blocks.append(
             f"{index}\n"
             f"{_format_ms_to_srt_timestamp(cue['start'])} --> "
@@ -812,18 +916,33 @@ def build_srt_from_transcript_data(data: Dict[str, Any]) -> str:
     return "\n".join(blocks)
 
 
-def build_plain_text_from_transcript_data(data: Dict[str, Any]) -> str:
-    """Plain transcript text preferring structured cues, then ``text`` field."""
-    plain = str(data.get("text") or "").strip()
-    if plain:
-        return plain
+def build_plain_text_from_transcript_data(
+    data: Dict[str, Any],
+    speaker_map: Optional[Dict[str, str]] = None,
+    *,
+    include_timestamps: bool = True,
+) -> str:
+    """Plain transcript with speaker names (and optional timestamps) from cues.
+
+    When structured utterances/words exist, prefer cue lines over the flat
+    ``text`` field so exports keep speaker labels and timings.
+    """
     cues = _transcript_cues_from_data(data)
-    lines: List[str] = []
-    for cue in cues:
-        speaker = cue.get("speaker")
-        prefix = f"Speaker {speaker}: " if speaker not in (None, "") else ""
-        lines.append(f"{prefix}{cue['text']}")
-    return "\n".join(lines)
+    if cues:
+        lines: List[str] = []
+        for cue in cues:
+            label = resolve_speaker_label(cue.get("speaker"), speaker_map)
+            prefix = f"{label}: " if label else ""
+            if include_timestamps:
+                start = format_ms_to_timestamp(int(cue.get("start") or 0))
+                end = format_ms_to_timestamp(int(cue.get("end") or 0))
+                lines.append(f"[{start} - {end}] {prefix}{cue['text']}")
+            else:
+                lines.append(f"{prefix}{cue['text']}")
+        return "\n".join(lines)
+
+    plain = str(data.get("text") or "").strip()
+    return plain
 
 
 def normalize_transcript_payload(data: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:

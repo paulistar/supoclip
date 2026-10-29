@@ -59,6 +59,41 @@ def test_plain_text_prefers_text_field():
     )
 
 
+def test_plain_text_prefers_cues_with_speaker_map_and_timestamps():
+    from src.media.transcription import resolve_speaker_label
+
+    payload = {
+        "text": "flat text without speakers",
+        "words": [],
+        "utterances": [
+            {
+                "text": "Oi mundo",
+                "start": 1000,
+                "end": 2500,
+                "speaker": "A",
+            }
+        ],
+    }
+    text = build_plain_text_from_transcript_data(
+        payload, speaker_map={"A": "Maria"}
+    )
+    assert "[00:01 - 00:02] Maria: Oi mundo" in text
+    assert resolve_speaker_label("A", {"A": "Maria"}) == "Maria"
+
+
+def test_srt_uses_speaker_map_labels():
+    payload = {
+        "text": "Oi",
+        "words": [],
+        "utterances": [
+            {"text": "Oi", "start": 0, "end": 500, "speaker": "A"},
+        ],
+    }
+    srt = build_srt_from_transcript_data(payload, speaker_map={"A": "João"})
+    assert "João: Oi" in srt
+    assert "Speaker A:" not in srt
+
+
 def test_wrap_unwrap_transcript_payload_roundtrip():
     payload = {
         "version": 1,

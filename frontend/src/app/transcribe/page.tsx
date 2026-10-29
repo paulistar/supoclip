@@ -5,7 +5,12 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FileText, Loader2, Upload, Youtube } from "lucide-react";
 import { useSession } from "@/lib/auth-client";
-import { getYouTubeThumbnailUrl, uploadVideoFile } from "@/lib/video-upload";
+import {
+  getYouTubeThumbnailUrl,
+  isAcceptedMediaFile,
+  MEDIA_UPLOAD_ACCEPT,
+  uploadMediaFile,
+} from "@/lib/video-upload";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
 import { fetchGenerations, timeAgo, type GenerationSummary } from "@/lib/generations";
 import { StatusBadge, ACTIVE_TASK_STATUSES } from "@/components/app/status-badge";
@@ -55,8 +60,12 @@ export default function TranscribePage() {
     try {
       let videoUrl = url.trim();
       if (sourceType === "upload" && file) {
-        setStatusMessage("Enviando vídeo…");
-        videoUrl = await uploadVideoFile(file);
+        setStatusMessage(
+          file.type.startsWith("audio/") || /\.(mp3|wav|ogg|opus|m4a|aac|flac)$/i.test(file.name)
+            ? "Enviando áudio…"
+            : "Enviando vídeo…",
+        );
+        videoUrl = await uploadMediaFile(file);
       }
 
       setStatusMessage(
@@ -108,8 +117,8 @@ export default function TranscribePage() {
           Transcrição completa
         </h1>
         <p className="max-w-xl text-sm text-muted-foreground">
-          YouTube ou upload → texto em alta qualidade (AssemblyAI), sem cortes.
-          Idioma: português.
+          YouTube, vídeo ou áudio (mp3, wav, opus…) → texto em alta qualidade
+          (AssemblyAI), com identificação de falantes. Idioma: português.
         </p>
       </header>
 
@@ -123,20 +132,27 @@ export default function TranscribePage() {
           onDrop={(event) => {
             event.preventDefault();
             const dropped = event.dataTransfer.files?.[0];
-            if (dropped?.type.startsWith("video/")) {
+            if (dropped && isAcceptedMediaFile(dropped)) {
               setFile(dropped);
               setUrl("");
               setError(null);
+            } else if (dropped) {
+              setError("Formato não suportado. Use vídeo ou áudio (mp3, wav, opus…).");
             }
           }}
         >
           <input
             id="transcribe-upload"
             type="file"
-            accept="video/*"
+            accept={MEDIA_UPLOAD_ACCEPT}
             className="sr-only"
             onChange={(event) => {
               const next = event.target.files?.[0] || null;
+              if (next && !isAcceptedMediaFile(next)) {
+                setError("Formato não suportado. Use vídeo ou áudio (mp3, wav, opus…).");
+                event.target.value = "";
+                return;
+              }
               setFile(next);
               if (next) setUrl("");
               setError(null);
@@ -168,7 +184,7 @@ export default function TranscribePage() {
                 className="flex cursor-pointer items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
               >
                 <Upload className="size-4" />
-                Arraste um vídeo ou clique para enviar
+                Arraste um vídeo ou áudio, ou clique para enviar
               </label>
               <div className="flex items-center gap-2">
                 <Youtube className="size-4 shrink-0 text-muted-foreground" />

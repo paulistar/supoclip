@@ -1,6 +1,35 @@
 import { parseApiError, formatSupportMessage } from "@/lib/api-error";
 
 export const MAX_VIDEO_UPLOAD_BYTES = 12_000_000_000;
+export const MAX_MEDIA_UPLOAD_BYTES = MAX_VIDEO_UPLOAD_BYTES;
+
+/** Accept attribute for video + common audio formats (transcribe upload). */
+export const MEDIA_UPLOAD_ACCEPT =
+  "video/*,audio/*,.mp3,.wav,.ogg,.opus,.m4a,.aac,.flac,.webm,.mp4,.mov,.mkv";
+
+const AUDIO_OR_VIDEO_EXTENSIONS = new Set([
+  "mp3",
+  "wav",
+  "ogg",
+  "opus",
+  "m4a",
+  "aac",
+  "flac",
+  "webm",
+  "mp4",
+  "mov",
+  "mkv",
+  "m4v",
+  "avi",
+]);
+
+export function isAcceptedMediaFile(file: File): boolean {
+  if (file.type.startsWith("video/") || file.type.startsWith("audio/")) {
+    return true;
+  }
+  const ext = file.name.split(".").pop()?.toLowerCase() || "";
+  return AUDIO_OR_VIDEO_EXTENSIONS.has(ext);
+}
 
 // Only surface the font search box once the list is long enough to need it.
 export const FONT_SEARCH_THRESHOLD = 8;
@@ -73,13 +102,18 @@ async function requestUploadAuthorization(): Promise<UploadAuthorization> {
 }
 
 export async function uploadVideoFile(file: File): Promise<string> {
-  if (file.size > MAX_VIDEO_UPLOAD_BYTES) {
-    throw new Error("Uploaded file is too large. Please upload a video under 12 GB.");
+  return uploadMediaFile(file);
+}
+
+/** Upload video or audio; returns an `upload://…` path for task creation. */
+export async function uploadMediaFile(file: File): Promise<string> {
+  if (file.size > MAX_MEDIA_UPLOAD_BYTES) {
+    throw new Error("Arquivo muito grande. Envie um arquivo com menos de 12 GB.");
   }
 
   const uploadAuthorization = await requestUploadAuthorization();
   if (!uploadAuthorization.directUpload) {
-    return uploadVideoFileViaProxy(file);
+    return uploadMediaFileViaProxy(file);
   }
 
   const formData = new FormData();
@@ -94,7 +128,7 @@ export async function uploadVideoFile(file: File): Promise<string> {
   if (!uploadResponse.ok) {
     const fallbackMessage =
       uploadResponse.status === 413
-        ? "Uploaded file is too large. Please upload a video under 12 GB."
+        ? "Arquivo muito grande. Envie um arquivo com menos de 12 GB."
         : `Upload error: ${uploadResponse.status}`;
     const uploadError = await parseApiError(uploadResponse, fallbackMessage);
     throw new Error(formatSupportMessage(uploadError));
@@ -109,6 +143,10 @@ export async function uploadVideoFile(file: File): Promise<string> {
 }
 
 export async function uploadVideoFileViaProxy(file: File): Promise<string> {
+  return uploadMediaFileViaProxy(file);
+}
+
+export async function uploadMediaFileViaProxy(file: File): Promise<string> {
   const formData = new FormData();
   formData.append("video", file);
 
@@ -120,7 +158,7 @@ export async function uploadVideoFileViaProxy(file: File): Promise<string> {
   if (!uploadResponse.ok) {
     const fallbackMessage =
       uploadResponse.status === 413
-        ? "Uploaded file is too large. Please upload a video under 12 GB."
+        ? "Arquivo muito grande. Envie um arquivo com menos de 12 GB."
         : `Upload error: ${uploadResponse.status}`;
     const uploadError = await parseApiError(uploadResponse, fallbackMessage);
     throw new Error(formatSupportMessage(uploadError));

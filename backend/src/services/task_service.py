@@ -49,13 +49,17 @@ from ..clip_review import (
 )
 from ..clip_source_map import load_clip_caption_settings
 from ..media.transcription import (
+    _prepare_audio_for_transcription,
     build_plain_text_from_transcript_data,
+    build_speaker_summaries,
     build_srt_from_transcript_data,
+    default_speaker_map_from_payload,
     load_cached_transcript_data,
     normalize_transcript_payload,
     unwrap_transcript_payload_from_cache,
     wrap_transcript_payload_for_cache,
 )
+import shutil
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
 logger = logging.getLogger(__name__)
@@ -326,6 +330,26 @@ class TaskService(ClipEditingMixin):
         )
         return (now - updated_at).total_seconds()
 
+    def _persist_transcribe_preview_media(
+        self, task_id: str, video_path: Path
+    ) -> Optional[str]:
+        """Keep a stable mono mp3 for speaker-sample playback after cleanup."""
+        try:
+            audio_path = _prepare_audio_for_transcription(video_path)
+            if not audio_path.exists() or audio_path.stat().st_size <= 0:
+                return None
+            preview_dir = Path(self.config.temp_dir) / "transcribe-previews"
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            dest = preview_dir / f"{task_id}.mp3"
+            if audio_path.resolve() != dest.resolve():
+                shutil.copy2(audio_path, dest)
+            return str(dest)
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist transcribe preview for %s: %s", task_id, exc
+            )
+            return None
+
     @staticmethod
     def _cleanup_source_video(
         video_path: Optional[Path], source_type: str, url: str
@@ -336,6 +360,7 @@ class TaskService(ClipEditingMixin):
         For YouTube sources, ``cleanup_downloaded_files`` removes downloaded
         media and partials but retains word timings. For uploads we remove the audio sidecar
         generated for transcription — the original upload is owned elsewhere.
+        Transcribe preview mp3s under ``transcribe-previews/`` are kept separately.
         """
         if not video_path:
             return
@@ -1421,7 +1446,39 @@ class TaskService(ClipEditingMixin):
                 )
 
             await update_progress(95, "Salvando transcript…")
-            preview = (payload.get("text") or transcript_text or "")[:2000]
+            preview_media_path: Optional[str] = None
+            if video_path:
+                preview_media_path = self._persist_transcribe_preview_media(
+                    task_id, video_path
+                )
+            elif isinstance(source_metadata.get("preview_media_path"), str):
+                preview_media_path = source_metadata["preview_media_path"]
+            elif cache_entry and isinstance(cache_entry.get("video_path"), str):
+                cached_video = Path(cache_entry["video_path"])
+                if cached_video.exists():
+                    preview_media_path = self._persist_transcribe_preview_media(
+                        task_id, cached_video
+                    )
+
+            existing_map = source_metadata.get("speaker_map")
+            speaker_map = (
+                {
+                    str(k): str(v).strip()
+                    for k, v in existing_map.items()
+                    if isinstance(v, str) and str(v).strip()
+                }
+                if isinstance(existing_map, dict)
+                else {}
+            )
+            if not speaker_map:
+                speaker_map = default_speaker_map_from_payload(payload)
+
+            preview_text = build_plain_text_from_transcript_data(
+                payload, speaker_map=speaker_map
+            )
+            preview = (preview_text or payload.get("text") or transcript_text or "")[
+                :2000
+            ]
             meta_update = {
                 **source_metadata,
                 "job_kind": "transcribe",
@@ -1430,9 +1487,12 @@ class TaskService(ClipEditingMixin):
                 "transcript_payload": payload,
                 "transcript_preview": preview,
                 "transcript_char_count": len(
-                    payload.get("text") or transcript_text or ""
+                    preview_text or payload.get("text") or transcript_text or ""
                 ),
+                "speaker_map": speaker_map,
             }
+            if preview_media_path:
+                meta_update["preview_media_path"] = preview_media_path
             await self._db_after_render_gap(
                 self.task_repo.save_source_metadata,
                 self.db,
@@ -1486,17 +1546,28 @@ class TaskService(ClipEditingMixin):
                 self._cleanup_source_video(video_path, source_type, url)
             raise
 
-    async def get_transcript_export(
-        self, task_id: str, fmt: str = "txt"
-    ) -> tuple[str, str, str]:
-        """Return (body, media_type, filename) for a transcribe task export."""
-        metadata = await self.task_repo.load_source_metadata(self.db, task_id)
-        if metadata.get("job_kind") != "transcribe":
+    def _speaker_map_from_metadata(
+        self, metadata: Dict[str, Any], payload: Dict[str, Any]
+    ) -> Dict[str, str]:
+        defaults = default_speaker_map_from_payload(payload)
+        raw = metadata.get("speaker_map")
+        merged = dict(defaults)
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                if isinstance(value, str) and value.strip():
+                    merged[str(key)] = value.strip()
+        return merged
+
+    async def _load_transcribe_payload(
+        self, task_id: str, metadata: Optional[Dict[str, Any]] = None
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        meta = metadata or await self.task_repo.load_source_metadata(self.db, task_id)
+        if meta.get("job_kind") != "transcribe":
             raise ValueError("Task is not a transcription job")
 
-        payload = normalize_transcript_payload(metadata.get("transcript_payload"))
+        payload = normalize_transcript_payload(meta.get("transcript_payload"))
         if not payload:
-            cache_key = metadata.get("transcript_cache_key")
+            cache_key = meta.get("transcript_cache_key")
             if isinstance(cache_key, str) and cache_key:
                 cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
                 if cache_entry:
@@ -1508,7 +1579,7 @@ class TaskService(ClipEditingMixin):
                             "text": cache_entry["transcript_text"],
                             "words": [],
                             "utterances": [],
-                            "language_code": metadata.get("language"),
+                            "language_code": meta.get("language"),
                         }
                     video_path_raw = cache_entry.get("video_path")
                     if not payload and isinstance(video_path_raw, str) and video_path_raw:
@@ -1520,6 +1591,118 @@ class TaskService(ClipEditingMixin):
 
         if not payload:
             raise ValueError("Transcript not available yet")
+        return meta, payload
+
+    async def list_transcribe_speakers(self, task_id: str) -> Dict[str, Any]:
+        """Return diarized speakers + labels for the review UI."""
+        metadata, payload = await self._load_transcribe_payload(task_id)
+        speaker_map = self._speaker_map_from_metadata(metadata, payload)
+        speakers = build_speaker_summaries(payload, speaker_map=speaker_map)
+        return {
+            "speakers": speakers,
+            "speaker_map": speaker_map,
+            "has_preview_media": bool(self.resolve_transcribe_preview_path(metadata)),
+        }
+
+    async def save_transcribe_speakers(
+        self, task_id: str, speakers: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Persist speaker name overrides and refresh transcript preview."""
+        metadata, payload = await self._load_transcribe_payload(task_id)
+        cleaned: Dict[str, str] = {}
+        for key, value in (speakers or {}).items():
+            if not isinstance(value, str):
+                continue
+            label = value.strip()
+            if label:
+                cleaned[str(key)] = label
+        if not cleaned:
+            cleaned = default_speaker_map_from_payload(payload)
+
+        preview_text = build_plain_text_from_transcript_data(
+            payload, speaker_map=cleaned
+        )
+        metadata_update = {
+            **metadata,
+            "speaker_map": cleaned,
+            "transcript_preview": (preview_text or "")[:2000],
+            "transcript_char_count": len(preview_text or ""),
+        }
+        await self.task_repo.save_source_metadata(self.db, task_id, metadata_update)
+        return await self.list_transcribe_speakers(task_id)
+
+    def resolve_transcribe_preview_path(
+        self, metadata: Dict[str, Any]
+    ) -> Optional[Path]:
+        """Resolve on-disk audio used for speaker sample playback."""
+        raw = metadata.get("preview_media_path")
+        if isinstance(raw, str) and raw.strip():
+            path = Path(raw.strip())
+            if path.exists() and path.is_file():
+                return path
+
+        # Fallback: original upload still on disk.
+        task_url = metadata.get("source_url") or metadata.get("url")
+        # source url lives on the task row; callers may also pass it.
+        return None
+
+    async def get_transcribe_preview_media_path(self, task_id: str) -> Path:
+        """Resolve preview audio path for a completed transcribe task."""
+        metadata = await self.task_repo.load_source_metadata(self.db, task_id)
+        if metadata.get("job_kind") != "transcribe":
+            raise ValueError("Task is not a transcription job")
+
+        path = self.resolve_transcribe_preview_path(metadata)
+        if path:
+            return path
+
+        task = await self.task_repo.get_task_by_id(self.db, task_id)
+        source_url = (task or {}).get("source_url") or ""
+        source_type = (task or {}).get("source_type") or ""
+        if source_type == "upload" and isinstance(source_url, str) and source_url:
+            try:
+                upload_path = self.video_service.resolve_local_video_path(source_url)
+                if upload_path.exists():
+                    persisted = self._persist_transcribe_preview_media(
+                        task_id, upload_path
+                    )
+                    if persisted:
+                        await self.task_repo.save_source_metadata(
+                            self.db,
+                            task_id,
+                            {**metadata, "preview_media_path": persisted},
+                        )
+                        return Path(persisted)
+                    return upload_path
+            except ValueError:
+                pass
+
+        cache_key = metadata.get("transcript_cache_key")
+        if isinstance(cache_key, str) and cache_key:
+            cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
+            video_path_raw = (cache_entry or {}).get("video_path")
+            if isinstance(video_path_raw, str) and video_path_raw:
+                cached_video = Path(video_path_raw)
+                if cached_video.exists():
+                    persisted = self._persist_transcribe_preview_media(
+                        task_id, cached_video
+                    )
+                    if persisted:
+                        await self.task_repo.save_source_metadata(
+                            self.db,
+                            task_id,
+                            {**metadata, "preview_media_path": persisted},
+                        )
+                        return Path(persisted)
+
+        raise FileNotFoundError("Preview media not available for this transcription")
+
+    async def get_transcript_export(
+        self, task_id: str, fmt: str = "txt"
+    ) -> tuple[str, str, str]:
+        """Return (body, media_type, filename) for a transcribe task export."""
+        metadata, payload = await self._load_transcribe_payload(task_id)
+        speaker_map = self._speaker_map_from_metadata(metadata, payload)
 
         fmt_normalized = (fmt or "txt").strip().lower()
         if fmt_normalized not in {"txt", "srt", "json"}:
@@ -1530,14 +1713,20 @@ class TaskService(ClipEditingMixin):
         safe_title = re.sub(r"[^\w\-]+", "_", str(raw_title))[:60] or "transcript"
 
         if fmt_normalized == "json":
-            body = json.dumps(payload, ensure_ascii=False, indent=2)
+            export_payload = {
+                **payload,
+                "speaker_map": speaker_map,
+            }
+            body = json.dumps(export_payload, ensure_ascii=False, indent=2)
             return body, "application/json", f"{safe_title}.json"
         if fmt_normalized == "srt":
-            body = build_srt_from_transcript_data(payload)
+            body = build_srt_from_transcript_data(payload, speaker_map=speaker_map)
             if not body.strip():
                 raise ValueError("No timed cues available for SRT export")
             return body, "application/x-subrip", f"{safe_title}.srt"
-        body = build_plain_text_from_transcript_data(payload)
+        body = build_plain_text_from_transcript_data(
+            payload, speaker_map=speaker_map
+        )
         return body, "text/plain; charset=utf-8", f"{safe_title}.txt"
 
     async def get_task_with_clips(self, task_id: str) -> Optional[Dict[str, Any]]:
